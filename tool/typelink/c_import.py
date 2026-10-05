@@ -1,0 +1,322 @@
+"""C / C++ struct importer built on tree-sitter."""
+import re
+
+import tree_sitter_c
+import tree_sitter_cpp
+from tree_sitter import Language, Parser
+
+from . import spec as specmod
+from .model import ImportError_, Member, Result, Struct, align_up
+
+_LANGS = {"C": tree_sitter_c.language, "CPP": tree_sitter_cpp.language}
+_AGG = ("struct_specifier", "union_specifier", "class_specifier")
+_INT_SUFFIX = re.compile(r"[uUlL]+$")
+
+
+def _txt(n):
+    return n.text.decode()
+
+
+class _Importer:
+    def __init__(self, source, origin, model_name):
+        types = specmod.load_types()
+        self.sysml_types = types["sysml"]
+        self.scalars = types["c_scalars"]
+        self.model = types["data_models"][model_name or types["default_data_model"]]
+        self.warnings = []
+        parser = Parser(Language(_LANGS[origin]()))
+        self.root = parser.parse(source.encode()).root_node
+        self.aggs = {}       # tag/typedef name -> specifier node
+        self.aliases = {}    # typedef name -> type node
+        self.enums = set()
+        self.defines = {}
+        self.cache = {}
+        self._collect(self.root)
+
+    # ---- symbol collection -------------------------------------------------
+    def _collect(self, node):
+        for n in node.children:
+            t = n.type
+            if t in _AGG and n.child_by_field_name("body") is not None:
+                nm = n.child_by_field_name("name")
+                if nm is not None:
+                    self.aggs.setdefault(_txt(nm), n)
+                self._collect(n.child_by_field_name("body"))
+            elif t == "enum_specifier":
+                nm = n.child_by_field_name("name")
+                if nm is not None:
+                    self.enums.add(_txt(nm))
+                self._collect_enum(n)
+            elif t == "type_definition":
+                ty = n.child_by_field_name("type")
+                for d in n.children_by_field_name("declarator"):
+                    name = self._decl_name(d)
+                    if name is None:
+                        continue
+                    if ty.type in _AGG and ty.child_by_field_name("body") is not None:
+                        self.aggs.setdefault(name, ty)
+                    elif ty.type == "enum_specifier":
+                        self.enums.add(name)
+                    else:
+                        self.aliases.setdefault(name, (ty, d))
+                self._collect(n)
+            elif t == "preproc_def":
+                nm, val = n.child_by_field_name("name"), n.child_by_field_name("value")
+                if nm is not None and val is not None:
+                    self.defines[_txt(nm)] = _txt(val).strip()
+            else:
+                self._collect(n)
+
+    def _collect_enum(self, n):
+        body = n.child_by_field_name("body")
+        if body is None:
+            return
+        nxt = 0
+        for e in body.named_children:
+            if e.type != "enumerator":
+                continue
+            v = e.child_by_field_name("value")
+            val = self._eval(v) if v is not None else nxt
+            if val is not None:
+                self.defines[_txt(e.child_by_field_name("name"))] = str(val)
+                nxt = val + 1
+
+    def _decl_name(self, d):
+        while d is not None:
+            if d.type in ("type_identifier", "identifier", "field_identifier"):
+                return _txt(d)
+            d = d.child_by_field_name("declarator")
+        return None
+
+    # ---- constant expressions for array sizes ------------------------------
+    def _eval(self, n, depth=0):
+        if n is None or depth > 8:
+            return None
+        t = n.type
+        if t == "number_literal":
+            try:
+                return int(_INT_SUFFIX.sub("", _txt(n)), 0)
+            except ValueError:
+                return None
+        if t == "identifier":
+            v = self.defines.get(_txt(n))
+            if v is None:
+                return None
+            sub = Parser(Language(tree_sitter_c.language())).parse((v + ";").encode()).root_node
+            e = sub.named_children[0] if sub.named_children else None
+            if e is not None and e.type == "expression_statement":
+                e = e.named_children[0] if e.named_children else None
+            return self._eval(e, depth + 1)
+        if t == "parenthesized_expression":
+            return self._eval(n.named_children[0], depth + 1)
+        if t == "binary_expression":
+            a = self._eval(n.child_by_field_name("left"), depth + 1)
+            b = self._eval(n.child_by_field_name("right"), depth + 1)
+            op = _txt(n.child_by_field_name("operator"))
+            if a is None or b is None:
+                return None
+            try:
+                return {"+": a + b, "-": a - b, "*": a * b, "/": a // b if b else None,
+                        "<<": a << b, ">>": a >> b}.get(op)
+            except (ValueError, OverflowError):
+                return None
+        return None
+
+    # ---- type resolution ---------------------------------------------------
+    def _scalar(self, name):
+        """-> (kind, bits) or None for a normalised C scalar spelling."""
+        name = name.replace("std::", "")
+        if name in self.scalars:
+            kind, bits = self.scalars[name]
+            return kind, (self.model[bits] if isinstance(bits, str) else bits)
+        return None
+
+    def _base_type(self, n):
+        """-> ('scalar', kind, bits) | ('agg', Struct) | ('unresolved', text)"""
+        t = n.type
+        if t == "primitive_type" or t == "sized_type_specifier":
+            words = [w for w in _txt(n).split() if w not in ("signed", "unsigned")]
+            spelling = " ".join(words) or "int"
+            if spelling in ("char", "short", "int", "long", "long long"):
+                return ("scalar", "integer", self.model[spelling])
+            if spelling == "short int":
+                return ("scalar", "integer", self.model["short"])
+            if spelling in ("long int",):
+                return ("scalar", "integer", self.model["long"])
+            if spelling in ("long long int",):
+                return ("scalar", "integer", self.model["long long"])
+            sc = self._scalar(spelling)
+            if sc:
+                return ("scalar",) + sc
+            return ("unresolved", _txt(n))
+        if t in ("type_identifier", "qualified_identifier"):
+            name = _txt(n)
+            sc = self._scalar(name)
+            if sc:
+                return ("scalar",) + sc
+            if name in self.enums:
+                return ("scalar", "integer", self.model["int"])
+            if name in self.aliases:
+                ty, d = self.aliases[name]
+                inner = self._base_type(ty)
+                return self._apply_declarator(inner, d)
+            if name in self.aggs:
+                return ("agg", self._layout(self.aggs[name], name))
+            return ("unresolved", name)
+        if t in _AGG:
+            name = n.child_by_field_name("name")
+            if n.child_by_field_name("body") is not None:
+                return ("agg", self._layout(n, _txt(name) if name is not None else None))
+            if name is not None and _txt(name) in self.aggs:
+                return ("agg", self._layout(self.aggs[_txt(name)], _txt(name)))
+            return ("unresolved", _txt(name) if name is not None else _txt(n))
+        if t == "enum_specifier":
+            return ("scalar", "integer", self.model["int"])
+        return ("unresolved", _txt(n))
+
+    def _apply_declarator(self, base, d):
+        if d.type == "pointer_declarator":
+            return ("scalar", "integer", self.model["pointer"])
+        return base
+
+    def _declarator(self, d):
+        """-> (name, pointer, dims(list of nodes), is_func)"""
+        pointer = func = False
+        dims = []
+        while d is not None:
+            t = d.type
+            if t in ("field_identifier", "identifier", "type_identifier"):
+                return _txt(d), pointer, list(reversed(dims)), func and not pointer
+            if t in ("pointer_declarator", "reference_declarator"):
+                pointer = True
+            elif t == "array_declarator":
+                dims.append(d.child_by_field_name("size"))
+            elif t == "function_declarator":
+                func = True
+            nxt = d.child_by_field_name("declarator")
+            if nxt is None and d.named_children:
+                nxt = d.named_children[0]
+            d = nxt
+        return None, pointer, dims, func and not pointer
+
+    # ---- layout ------------------------------------------------------------
+    def _layout(self, spec_node, name):
+        key = spec_node.id
+        if key in self.cache:
+            return self.cache[key]
+        st = Struct(name or "anonymous")
+        self.cache[key] = st
+        union = spec_node.type == "union_specifier"
+        unknown = False
+        off = 0
+        maxalign = 8
+        size = 0
+        body = spec_node.child_by_field_name("body")
+        if any(c.type == "base_class_clause" for c in spec_node.children):
+            self.warnings.append(f"{st.name}: base classes are not laid out; total size unknown")
+            unknown = True
+        for f in body.named_children:
+            if f.type != "field_declaration":
+                continue
+            if any(c.type == "storage_class_specifier" and _txt(c) == "static" for c in f.children):
+                continue
+            ty = f.child_by_field_name("type")
+            decls = f.children_by_field_name("declarator")
+            bf = next((c for c in f.children if c.type == "bitfield_clause"), None)
+            if not decls:
+                # anonymous struct/union member: flatten
+                base = self._base_type(ty)
+                if base[0] == "agg" and ty.type in _AGG:
+                    sub = base[1]
+                    st.members += sub.members
+                    st.nested += sub.nested
+                    if sub.bits is None:
+                        unknown = True
+                    else:
+                        a = 8
+                        off = align_up(off, a) + sub.bits if not union else off
+                        size = max(size, sub.bits)
+                continue
+            for d in decls:
+                mname, pointer, dims, func = self._declarator(d)
+                if func or mname is None:
+                    continue
+                base = ("scalar", "integer", self.model["pointer"]) if pointer else self._base_type(ty)
+                count, dynamic = 1, False
+                for dn in dims:
+                    v = self._eval(dn)
+                    if v is None:
+                        dynamic = True
+                    else:
+                        count *= v
+                if dims and dynamic:
+                    self.warnings.append(f"{st.name}.{mname}: array size is not a constant; sized as variable")
+                member, bits, align = self._member(mname, base, st)
+                if dims:
+                    member.lower, member.upper = (0, None) if dynamic else (count, count)
+                if bf is not None and bits is not None:
+                    width = self._eval(bf.named_children[0]) if bf.named_children else None
+                    if width is None:
+                        unknown = True
+                    elif width == 0:
+                        off = align_up(off, bits)
+                        continue
+                    else:
+                        if not union and (off % bits) + width > bits:
+                            off = align_up(off, bits)
+                        member.bits = width
+                        st.members.append(member)
+                        if union:
+                            size = max(size, width)
+                        else:
+                            off += width
+                        maxalign = max(maxalign, align or 8)
+                        continue
+                st.members.append(member)
+                if bits is None or dynamic or unknown:
+                    unknown = True
+                    continue
+                total = bits * count
+                maxalign = max(maxalign, align)
+                if union:
+                    size = max(size, total)
+                else:
+                    off = align_up(off, align) + total
+        if unknown:
+            st.bits = None
+        elif union:
+            st.bits = align_up(size, maxalign)
+        else:
+            st.bits = align_up(off, maxalign)
+        return st
+
+    def _member(self, name, base, owner):
+        """-> (Member, bits, align)"""
+        if base[0] == "scalar":
+            _, kind, bits = base
+            return Member(name, kind, bits), bits, min(bits, 128)
+        if base[0] == "agg":
+            sub = base[1]
+            if sub not in owner.nested:
+                owner.nested.append(sub)
+            align = min(self._struct_align(sub), 128) if sub.bits is not None else 8
+            return Member(name, "struct", sub.bits, sub.name), sub.bits, align
+        self.warnings.append(f"{owner.name}.{name}: unresolved type '{base[1]}'; size unknown")
+        return Member(name, "unresolved", None, base[1]), None, 8
+
+    def _struct_align(self, s):
+        a = 8
+        for m in s.members:
+            if m.bits:
+                a = max(a, min(m.bits, 128) if m.kind != "struct" else 8)
+        return a
+
+    def run(self, element):
+        node = self.aggs.get(element)
+        if node is None:
+            raise ImportError_(f"no struct/union/class named '{element}' found")
+        return Result(self._layout(node, element), self.warnings)
+
+
+def import_c(source, element, origin="C", data_model=None):
+    return _Importer(source, origin, data_model).run(element)

@@ -1,0 +1,34 @@
+{
+  "sysml": {
+    "integer": "ScalarValues::Integer",
+    "real": "ScalarValues::Real",
+    "boolean": "ScalarValues::Boolean",
+    "string": "ScalarValues::String"
+  },
+  "data_models": {
+    "ilp32": {"char": 8, "short": 16, "int": 32, "long": 32, "long long": 64, "pointer": 32},
+    "lp64": {"char": 8, "short": 16, "int": 32, "long": 64, "long long": 64, "pointer": 64},
+    "llp64": {"char": 8, "short": 16, "int": 32, "long": 32, "long long": 64, "pointer": 64}
+  },
+  "default_data_model": "lp64",
+  "c_scalars": {
+    "bool": ["boolean", 8], "_Bool": ["boolean", 8],
+    "float": ["real", 32], "double": ["real", 64], "long double": ["real", 128],
+    "int8_t": ["integer", 8], "uint8_t": ["integer", 8],
+    "int16_t": ["integer", 16], "uint16_t": ["integer", 16],
+    "int32_t": ["integer", 32], "uint32_t": ["integer", 32],
+    "int64_t": ["integer", 64], "uint64_t": ["integer", 64],
+    "size_t": ["integer", "pointer"], "ssize_t": ["integer", "pointer"],
+    "intptr_t": ["integer", "pointer"], "uintptr_t": ["integer", "pointer"]
+  },
+  "protobuf_scalars": {
+    "double": ["real", 64], "float": ["real", 32],
+    "int32": ["integer", 32], "int64": ["integer", 64],
+    "uint32": ["integer", 32], "uint64": ["integer", 64],
+    "sint32": ["integer", 32], "sint64": ["integer", 64],
+    "fixed32": ["integer", 32], "fixed64": ["integer", 64],
+    "sfixed32": ["integer", 32], "sfixed64": ["integer", 64],
+    "bool": ["boolean", 8],
+    "string": ["string", null], "bytes": ["string", null]
+  }
+}

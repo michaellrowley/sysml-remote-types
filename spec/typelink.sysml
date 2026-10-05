@@ -14,4 +14,12 @@ package TypeLinkMetadata {
         attribute origin : TypeOrigin;
         attribute uri : String;
     }
+    metadata def DataSize {
+        doc /* Size, in bits, of one instance of the annotated member, or of the
+             * whole item when it annotates an item definition (including any
+             * padding the origin's layout rules insert). Absent when the size
+             * is variable or unknown.
+             */
+        attribute bits : Natural;
+    }
 }
