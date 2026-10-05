@@ -75,6 +75,14 @@ definition's name, and generates the following inside the definition body,
 between the marker comments `// typelink:begin` and `// typelink:end`
 (regenerated in place on every run):
 
+By default, expansion reads only the resource at `uri`; it does not follow
+includes or imports. An implementation MAY offer an opt-in repository-context
+mode for GitHub `blob` URLs. In that mode it clones the linked repository to a
+temporary directory and makes the repository's tracked source files available
+to the language importer when resolving referenced types. Submodule contents
+are not included. This does not run a compiler or infer build-target include
+paths.
+
 - `@DataSize { bits = N; }` for the whole item, when its total size is known.
 - One `attribute` (scalar members) or `item` (aggregate members) per member,
   typed per `types.json` (`sysml` gives the SysMLv2 type of each kind),

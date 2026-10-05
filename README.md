@@ -43,6 +43,19 @@ Expansion writes generated content between `typelink:begin` and `typelink:end`
 markers; re-running it replaces that region. See the [RFC](spec/RFC.md) for
 the metadata definition, sizing rules, and supported formats.
 
+Additionally, Expansion reads only the linked file by default. Pass `--clone-repo` to clone
+the repository for GitHub `blob` URLs into a temporary directory and include
+the repository's tracked C/C++ or Protobuf source files when resolving types.
+The checkout is removed after expansion. This is opt-in because cloning can be
+slow and repositories can be large. The Python `emit.expand` API exposes the
+same option as `clone_repo=True`; importers also accept `additional_sources`
+for callers that already manage source context. This indexes matching files
+repo-wide; it does not run a compiler/preprocessor or infer build-target
+include paths. Git submodule contents are not included.
+
+Grammars are pinned git submodules in `tool/third_party/` (clone with
+`--recurse-submodules`, or run `git submodule update --init`):
+
 ## Grammar dependencies
 
 The grammars are pinned submodules in `tool/third_party/`. If you cloned

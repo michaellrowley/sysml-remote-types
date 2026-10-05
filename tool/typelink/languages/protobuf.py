@@ -8,9 +8,9 @@ from ..model import ImportError_, Member, Result, Struct
 from . import Importer, register
 
 
-def _import_proto(source, element):
+def _import_proto(source, element, additional_sources=()):
     scalars = specmod.load_types()["protobuf_scalars"]
-    f = Parser().parse(source)
+    files = [Parser().parse(text) for text in (source, *additional_sources)]
     messages, enums = {}, set()
 
     def collect(elements):
@@ -21,7 +21,8 @@ def _import_proto(source, element):
             elif isinstance(e, ast.Enum):
                 enums.add(e.name)
 
-    collect(f.file_elements)
+    for f in files:
+        collect(f.file_elements)
     if element not in messages:
         raise ImportError_(f"no message named '{element}' found")
     warnings, cache = [], {}
@@ -75,5 +76,5 @@ def _import_proto(source, element):
 
 @register("Protobuf")
 class ProtobufImporter(Importer):
-    def import_type(self, source, element, data_model=None):
-        return _import_proto(source, element)
+    def import_type(self, source, element, data_model=None, additional_sources=()):
+        return _import_proto(source, element, additional_sources)

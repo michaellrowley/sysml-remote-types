@@ -1,11 +1,16 @@
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext, redirect_stdout
+from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from typelink import emit, languages, parser, spec, sysml  # noqa: E402
+from typelink import emit, fetch, languages, parser, repository, spec, sysml  # noqa: E402
+from typelink.__main__ import main  # noqa: E402
 
 LINK = '''item def %s {
     @TypeLink {
@@ -70,6 +75,36 @@ class ParseTests(unittest.TestCase):
             parser.parse("item def {{{")
 
 
+class FetchTests(unittest.TestCase):
+    def test_github_blob_urls_rewrite_to_raw_content(self):
+        self.assertEqual(
+            fetch.raw_url("https://github.com/org/repo/blob/feature/v2/src/file.h"),
+            "https://raw.githubusercontent.com/org/repo/feature/v2/src/file.h")
+
+    def test_non_blob_urls_are_not_rewritten(self):
+        for uri in (
+            "https://github.com/org/repo/tree/main/src",
+            "https://example.com/org/repo/blob/main/file.h",
+            "file:///tmp/file.h",
+        ):
+            with self.subTest(uri=uri):
+                self.assertEqual(fetch.raw_url(uri), uri)
+
+    def test_http_fetch_rewrites_url_and_decodes_bytes(self):
+        with patch("typelink.fetch.urllib.request.urlopen",
+                   return_value=nullcontext(BytesIO(b"source"))) as open_url:
+            self.assertEqual(
+                fetch.fetch("https://github.com/org/repo/blob/main/file.h"), "source")
+        open_url.assert_called_once_with(
+            "https://raw.githubusercontent.com/org/repo/main/file.h", timeout=30)
+
+    def test_http_fetch_enforces_max_bytes(self):
+        with patch("typelink.fetch.urllib.request.urlopen",
+                   return_value=nullcontext(BytesIO(b"four"))):
+            with self.assertRaisesRegex(ValueError, "exceeds 3 bytes"):
+                fetch.fetch("https://example.com/file.h", max_bytes=3)
+
+
 class ExpandTests(unittest.TestCase):
     def test_c(self):
         out = expand_with("C", "pkt", C_SRC)
@@ -77,6 +112,24 @@ class ExpandTests(unittest.TestCase):
         self.assertIn("item 'in' : inner_t[4] { @DataSize { bits = 32; } }", out)
         self.assertIn("item def inner_t", out)
         self.assertIn("attribute p : ScalarValues::Integer { @DataSize { bits = 64; } }", out)
+
+    def test_c_additional_source_resolves_aggregate(self):
+        out = expand_with(
+            "C", "packet", "struct packet { struct header hdr; };",
+            additional_sources=["struct header { int kind; };"])
+        self.assertIn("item def header", out)
+        self.assertIn("item hdr : header", out)
+        self.assertIn("attribute kind : ScalarValues::Integer", out)
+        self.assertNotIn("ref item hdr", out)
+
+    def test_cpp_additional_source_resolves_class(self):
+        out = expand_with(
+            "CPP", "Packet", "class Packet { public: Header hdr; };",
+            additional_sources=["class Header { public: int kind; };"])
+        self.assertIn("item def Header", out)
+        self.assertIn("item hdr : Header", out)
+        self.assertIn("attribute kind : ScalarValues::Integer", out)
+        self.assertNotIn("ref item hdr", out)
 
     def test_data_model(self):
         out = expand_with("C", "u", C_SRC, data_model="ilp32")
@@ -101,24 +154,229 @@ class ExpandTests(unittest.TestCase):
         self.assertIn("attribute tags : ScalarValues::String[0..*];", out)
         self.assertIn("item def Inner", out)
 
+    def test_protobuf_additional_source_resolves_message(self):
+        out = expand_with(
+            "Protobuf", "Msg",
+            "message Msg { optional Other child = 1; repeated Other children = 2; }",
+            additional_sources=["message Other { int32 value = 1; }"])
+        self.assertIn("item def Other", out)
+        self.assertIn("item child : Other[0..1]", out)
+        self.assertIn("item children : Other[0..*]", out)
+        self.assertNotIn("ref item child", out)
+
     def test_idempotent(self):
         once = expand_with("C", "pkt", C_SRC)
         twice = emit.expand(once, fetcher=lambda uri: C_SRC)
         self.assertEqual(once, twice)
 
     def test_file_uri_and_missing(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".h", delete=False) as f:
-            f.write(C_SRC)
-        out = emit.expand(LINK % ("pkt", "C", Path(f.name).as_uri()))
-        self.assertIn("bits = 320", out)
-        with self.assertRaises(ValueError):
-            expand_with("C", "nope", C_SRC)
-        with self.assertRaises(ValueError):
-            emit.expand(LINK % ("pkt", "C", Path(f.name).as_uri()), max_bytes=10)
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "packet.h"
+            source.write_text(C_SRC)
+            uri = source.as_uri()
+            out = emit.expand(LINK % ("pkt", "C", uri))
+            self.assertIn("bits = 320", out)
+            with self.assertRaises(ValueError):
+                expand_with("C", "nope", C_SRC)
+            with self.assertRaises(ValueError):
+                emit.expand(LINK % ("pkt", "C", uri), max_bytes=10)
 
     def test_keyword_member_quoted(self):
         out = expand_with("C", "k", "struct k { int part; };")
         self.assertIn("attribute 'part'", out)
+
+
+class RepositoryTests(unittest.TestCase):
+    def test_clone_mode_is_opt_in(self):
+        with patch("typelink.emit.repository.fetch_sources") as fetch_sources:
+            expand_with("C", "k", "struct k { int value; };")
+        fetch_sources.assert_not_called()
+
+    def test_clone_mode_cannot_be_combined_with_custom_fetcher(self):
+        link = LINK % ("k", "C", "https://github.com/example/fixture/blob/main/k.h")
+        with self.assertRaisesRegex(ValueError, "fetcher and clone_repo"):
+            emit.expand(link, fetcher=lambda uri: "", clone_repo=True)
+
+    def test_expand_uses_cloned_sources_when_requested(self):
+        link = LINK % (
+            "packet", "C",
+            "https://github.com/example/fixture/blob/main/packet.h")
+        source = "struct packet { struct header hdr; };"
+        with patch("typelink.emit.repository.fetch_sources",
+                   return_value=(source, ["struct header { int kind; };"])):
+            out = emit.expand(link, clone_repo=True)
+        self.assertIn("item def header", out)
+        self.assertIn("item hdr : header", out)
+
+    def test_clone_mode_passes_max_bytes_to_repository_fetch(self):
+        link = LINK % (
+            "packet", "C",
+            "https://github.com/example/fixture/blob/main/packet.h")
+        with patch("typelink.emit.repository.fetch_sources",
+                   return_value=("struct packet {};", [])) as fetch_sources:
+            emit.expand(link, clone_repo=True, max_bytes=123)
+        fetch_sources.assert_called_once_with(
+            "https://github.com/example/fixture/blob/main/packet.h", "C", 123)
+
+    def test_rejects_non_github_and_malformed_blob_urls_before_cloning(self):
+        invalid_uris = (
+            "http://github.com/example/fixture/blob/main/packet.h",
+            "https://github.com.evil.test/example/fixture/blob/main/packet.h",
+            "https://github.com/example/fixture/tree/main/packet.h",
+            "https://github.com/example/fixture/blob/main",
+            "https://github.com/../fixture/blob/main/packet.h",
+            "https://github.com/example/fixture/blob/main/%2e%2e%2fsecret.h",
+            "https://github.com/example/.git/blob/main/packet.h",
+            "file:///tmp/packet.h",
+        )
+        with patch.object(repository, "_git") as git:
+            for uri in invalid_uris:
+                with self.subTest(uri=uri), self.assertRaises(ValueError):
+                    repository.fetch_sources(uri, "C")
+        git.assert_not_called()
+
+    def test_rejects_unsupported_origin_before_cloning(self):
+        with patch.object(repository, "_git") as git:
+            with self.assertRaisesRegex(ValueError, "unsupported for origin Rust"):
+                repository.fetch_sources(
+                    "https://github.com/example/fixture/blob/main/packet.rs", "Rust")
+        git.assert_not_called()
+
+    def test_clones_github_ref_and_collects_peer_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source_repo = Path(temp) / "source"
+            source_repo.mkdir()
+            subprocess.run(["git", "init", "-b", "main", str(source_repo)],
+                           check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source_repo), "config",
+                            "user.name", "TypeLink Test"], check=True)
+            subprocess.run(["git", "-C", str(source_repo), "config",
+                            "user.email", "typelink@example.invalid"], check=True)
+            (source_repo / "packet.h").write_text(
+                "struct packet { struct header hdr; };")
+            (source_repo / "header.h").write_text(
+                "struct header { int kind; };")
+            (source_repo / "service.proto").write_text(
+                "message Service { Child child = 1; }")
+            (source_repo / "child.proto").write_text(
+                "message Child { string name = 1; }")
+            (source_repo / "escape.h").symlink_to("/etc/passwd")
+            subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source_repo), "commit", "-m", "fixture"],
+                           check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(source_repo), "checkout", "-b", "release/v1"],
+                check=True, capture_output=True)
+            nested = source_repo / "nested dir"
+            nested.mkdir()
+            (nested / "packet type.h").write_text(
+                "struct packet_type { int value; };")
+            subprocess.run(["git", "-C", str(source_repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source_repo), "commit",
+                            "-m", "nested source"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(source_repo), "tag", "v1.0"],
+                           check=True, capture_output=True)
+            commit = subprocess.run(
+                ["git", "-C", str(source_repo), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True).stdout.strip()
+
+            real_git = repository._git
+            clone_destinations = []
+
+            def clone_local_source(args, **kwargs):
+                args = list(args)
+                if args[0] == "clone":
+                    args[-2] = str(source_repo)
+                    clone_destinations.append(Path(args[-1]))
+                return real_git(args, **kwargs)
+
+            with patch.object(repository, "_git", side_effect=clone_local_source):
+                source, peers = repository.fetch_sources(
+                    "https://github.com/example/fixture/blob/main/packet.h", "C")
+                proto_source, proto_peers = repository.fetch_sources(
+                    "https://github.com/example/fixture/blob/main/service.proto", "Protobuf")
+                with self.assertRaisesRegex(ValueError, "exceeds 4 bytes"):
+                    repository.fetch_sources(
+                        "https://github.com/example/fixture/blob/main/packet.h",
+                        "C", max_bytes=4)
+                nested_source, nested_peers = repository.fetch_sources(
+                    "https://github.com/example/fixture/blob/release/v1/"
+                    "nested%20dir/packet%20type.h", "C")
+                tag_source, _ = repository.fetch_sources(
+                    "https://github.com/example/fixture/blob/v1.0/"
+                    "nested%20dir/packet%20type.h", "C")
+                sha_source, _ = repository.fetch_sources(
+                    f"https://github.com/example/fixture/blob/{commit}/"
+                    "nested%20dir/packet%20type.h", "C")
+                with self.assertRaisesRegex(ValueError, "does not identify"):
+                    repository.fetch_sources(
+                        "https://github.com/example/fixture/blob/unknown/"
+                        "nested%20dir/packet%20type.h", "C")
+                with self.assertRaisesRegex(ValueError, "not found"):
+                    repository.fetch_sources(
+                        "https://github.com/example/fixture/blob/main/missing.h", "C")
+                with self.assertRaisesRegex(ValueError, "escapes the cloned repository"):
+                    repository.fetch_sources(
+                        "https://github.com/example/fixture/blob/main/escape.h", "C")
+
+        self.assertEqual(source, "struct packet { struct header hdr; };")
+        self.assertEqual(peers, ["struct header { int kind; };"])
+        self.assertEqual(proto_source, "message Service { Child child = 1; }")
+        self.assertEqual(proto_peers, ["message Child { string name = 1; }"])
+        self.assertEqual(nested_source, "struct packet_type { int value; };")
+        self.assertIn("struct header { int kind; };", nested_peers)
+        self.assertEqual(tag_source, nested_source)
+        self.assertEqual(sha_source, nested_source)
+        self.assertTrue(clone_destinations)
+        self.assertTrue(all(not path.exists() for path in clone_destinations))
+
+    def test_git_command_errors_are_reported(self):
+        with patch("typelink.repository.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(
+                       128, ["git", "clone"], stderr="fatal: repository not found")):
+            with self.assertRaisesRegex(ValueError, "failed: fatal: repository not found"):
+                repository._git(["clone", "https://github.com/example/missing.git"])
+
+    def test_git_timeout_is_reported(self):
+        with patch("typelink.repository.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(["git", "clone"], 1)):
+            with self.assertRaisesRegex(ValueError, "timed out"):
+                repository._git(["clone", "https://github.com/example/slow.git"])
+
+    def test_failed_clone_still_removes_temporary_directory(self):
+        real_temp_dir = tempfile.TemporaryDirectory
+        created = []
+
+        def track_temp_dir(*args, **kwargs):
+            result = real_temp_dir(*args, **kwargs)
+            created.append(Path(result.name))
+            return result
+
+        with patch("typelink.repository.tempfile.TemporaryDirectory",
+                   side_effect=track_temp_dir), patch.object(
+                       repository, "_git", side_effect=ValueError("clone failed")):
+            with self.assertRaisesRegex(ValueError, "clone failed"):
+                repository.fetch_sources(
+                    "https://github.com/example/fixture/blob/main/packet.h", "C")
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists())
+
+
+class CliTests(unittest.TestCase):
+    def test_expand_clone_option_is_opt_in(self):
+        with tempfile.NamedTemporaryFile("w") as model:
+            model.write(LINK % (
+                "packet", "C",
+                "https://github.com/example/fixture/blob/main/packet.h"))
+            model.flush()
+            for args, expected in (([], False), (["--clone-repo"], True)):
+                output = StringIO()
+                with self.subTest(args=args), patch(
+                        "typelink.__main__.emit.expand", return_value="expanded") as expand:
+                    with redirect_stdout(output):
+                        self.assertEqual(main(["expand", model.name, *args]), 0)
+                    self.assertEqual(output.getvalue(), "expanded")
+                    self.assertIs(expand.call_args.kwargs["clone_repo"], expected)
 
 
 if __name__ == "__main__":

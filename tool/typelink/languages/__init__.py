@@ -15,9 +15,9 @@ _REGISTRY = {}
 
 
 class Importer:
-    """Turns source text in some language into a language-neutral `Result`."""
+    """Turns source text and optional peer files into a language-neutral `Result`."""
 
-    def import_type(self, source, element, data_model=None):
+    def import_type(self, source, element, data_model=None, additional_sources=()):
         raise NotImplementedError
 
 
