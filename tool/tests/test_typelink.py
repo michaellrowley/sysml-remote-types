@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import tempfile
@@ -634,6 +635,79 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as result:
                 main(["kaitai", source.name, "--data-model", "lp64"])
         self.assertEqual(result.exception.code, 2)
+
+    def test_check_recurses_into_sysml_files_in_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "nested"
+            nested.mkdir()
+            top_model = root / "top.sysml"
+            nested_model = nested / "nested.sysml"
+            top_model.write_text(GOOD)
+            nested_model.write_text(GOOD.replace("lell_packet", "nested_packet"))
+            (nested / "ignored.txt").write_text("not SysML")
+            output = StringIO()
+
+            with redirect_stdout(output):
+                self.assertEqual(main(["check", str(root)]), 0)
+
+        results = json.loads(output.getvalue())
+        self.assertEqual([result["file"] for result in results],
+                         sorted([str(top_model), str(nested_model)]))
+        self.assertEqual({result["file"]: result["element"] for result in results},
+                         {str(top_model): "lell_packet",
+                          str(nested_model): "nested_packet"})
+
+    def test_expand_recurses_and_rewrites_sysml_files_in_place(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "nested"
+            nested.mkdir()
+            model = root / "top.sysml"
+            nested_model = nested / "nested.sysml"
+            model.write_text("top")
+            nested_model.write_text("nested")
+            (nested / "ignored.txt").write_text("untouched")
+            output = StringIO()
+
+            with patch("typelink.__main__.emit.expand",
+                       side_effect=lambda text, *args, **kwargs: "expanded " + text):
+                with redirect_stdout(output):
+                    self.assertEqual(main(["expand", str(root)]), 0)
+
+            self.assertEqual(model.read_text(), "expanded top")
+            self.assertEqual(nested_model.read_text(), "expanded nested")
+            self.assertEqual((nested / "ignored.txt").read_text(), "untouched")
+            self.assertEqual(output.getvalue(), "")
+
+    def test_expand_directory_rejects_output_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            error = StringIO()
+            with redirect_stderr(error):
+                self.assertEqual(main(["expand", temp, "-o", "output.sysml"]), 1)
+        self.assertIn("cannot be used with a directory target", error.getvalue())
+
+    def test_expand_directory_reports_errors_and_continues(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            broken = root / "a-broken.sysml"
+            valid = root / "b-valid.sysml"
+            broken.write_text("broken")
+            valid.write_text("valid")
+            error = StringIO()
+
+            def expand(text, *args, **kwargs):
+                if text == "broken":
+                    raise ValueError("invalid model")
+                return "expanded " + text
+
+            with patch("typelink.__main__.emit.expand", side_effect=expand):
+                with redirect_stderr(error):
+                    self.assertEqual(main(["expand", str(root)]), 1)
+
+            self.assertEqual(broken.read_text(), "broken")
+            self.assertEqual(valid.read_text(), "expanded valid")
+            self.assertIn(f"{broken}: invalid model", error.getvalue())
 
 
 if __name__ == "__main__":
