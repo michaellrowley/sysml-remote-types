@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "typelink"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "antlr4-python3-runtime==4.13.2",
+    "tree-sitter==0.25.2",
+    "proto-schema-parser==2.1.0",
+]
+
+[project.scripts]
+typelink = "typelink.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

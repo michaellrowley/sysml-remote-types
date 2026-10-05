@@ -1,12 +1,22 @@
 # sysml-remote-types
-The specification lives in `spec/` (`RFC.md` is the normative text; it embeds
-`typelink.sysml` and `types.json`, which the tool reads). The tool is in `tool/`:
 
-    pip install -r tool/requirements.txt
-    cd tool
-    python3 -m typelink check model.sysml          # validate @TypeLink usages
-    python3 -m typelink expand model.sysml         # generate full item bodies
-    python3 -m unittest discover -s tests
+From the repository root, install the CLI and its dependencies:
+
+    git submodule update --init --recursive && python -m pip install -e ./tool
+
+The specification lives in `spec/` (`RFC.md` is the normative text; it embeds
+`typelink.sysml` and `types.json`, which the tool reads). The tool is in `tool/`.
+
+After installation, `typelink` is available on `PATH` from any working
+directory (keep the repository checkout in place). For example:
+
+    typelink check model.sysml
+    typelink expand model.sysml
+
+If the command is not found, activate the environment where you installed it or
+add that environment's scripts directory to `PATH`. Run the tests with:
+
+    python -m unittest discover -s tool/tests
 
 Grammars are pinned git submodules in `tool/third_party/` (clone with
 `--recurse-submodules`, or run `git submodule update --init`):
