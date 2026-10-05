@@ -1,4 +1,13 @@
-"""C / C++ struct importer built on tree-sitter."""
+"""C / C++ importer: computes the bit layout of a struct/union/class.
+
+Pipeline: tree-sitter parses the source (grammar from the pinned third_party
+submodules); `_collect` indexes aggregates, typedefs, enums and #defines;
+`_layout` walks the requested aggregate's fields, applying natural-alignment
+rules, and returns a language-neutral `model.Struct`. Anything that cannot be
+sized (unknown types, non-constant arrays, base classes) is reported as a
+warning and makes the enclosing total size unknown (None) rather than guessed.
+Not modelled: #pragma pack, __attribute__((packed/aligned)), templates.
+"""
 import re
 
 from .. import spec as specmod
@@ -19,6 +28,8 @@ def _txt(n):
 
 
 class _Importer:
+    """One parse of one source file; resolves types and lays out aggregates."""
+
     def __init__(self, source, origin, model_name):
         types = specmod.load_types()
         self.sysml_types = types["sysml"]
@@ -28,14 +39,16 @@ class _Importer:
         parser = Parser(get_language(*_GRAMMARS[origin]))
         self.root = parser.parse(source.encode()).root_node
         self.aggs = {}       # tag/typedef name -> specifier node
-        self.aliases = {}    # typedef name -> type node
-        self.enums = set()
-        self.defines = {}
-        self.cache = {}
+        self.aliases = {}    # typedef name -> (type node, declarator node)
+        self.enums = set()   # enum tag/typedef names (laid out as int)
+        self.defines = {}    # #define / enumerator name -> replacement text (for array sizes)
+        self.cache = {}      # specifier node id -> Struct; also stops recursive types
         self._collect(self.root)
 
     # ---- symbol collection -------------------------------------------------
     def _collect(self, node):
+        """Recursively index every named aggregate, typedef, enum and constant.
+        setdefault keeps the first definition if a name is declared twice."""
         for n in node.children:
             t = n.type
             if t in _AGG and n.child_by_field_name("body") is not None:
@@ -69,6 +82,8 @@ class _Importer:
                 self._collect(n)
 
     def _collect_enum(self, n):
+        """Record enumerators as constants (explicit value, else previous + 1)
+        so they can be used as array sizes."""
         body = n.child_by_field_name("body")
         if body is None:
             return
@@ -83,6 +98,7 @@ class _Importer:
                 nxt = val + 1
 
     def _decl_name(self, d):
+        """Identifier at the bottom of a (possibly pointer/array) declarator chain."""
         while d is not None:
             if d.type in ("type_identifier", "identifier", "field_identifier"):
                 return _txt(d)
@@ -91,6 +107,9 @@ class _Importer:
 
     # ---- constant expressions for array sizes ------------------------------
     def _eval(self, n, depth=0):
+        """Evaluate an integer constant expression; None if it is not constant.
+        Supports literals, known #defines/enumerators and + - * / << >> with
+        parentheses. `depth` bounds macro-expansion cycles."""
         if n is None or depth > 8:
             return None
         t = n.type
@@ -103,6 +122,7 @@ class _Importer:
             v = self.defines.get(_txt(n))
             if v is None:
                 return None
+            # re-parse the macro body as a C expression statement
             sub = Parser(get_language(*_GRAMMARS["C"])).parse((v + ";").encode()).root_node
             e = sub.named_children[0] if sub.named_children else None
             if e is not None and e.type == "expression_statement":
@@ -125,7 +145,9 @@ class _Importer:
 
     # ---- type resolution ---------------------------------------------------
     def _scalar(self, name):
-        """-> (kind, bits) or None for a normalised C scalar spelling."""
+        """-> (kind, bits) for a scalar named in spec/types.json (fixed-width
+        and stdint types, floats, size_t...), or None. Entries whose width is a
+        string (e.g. "pointer") are looked up in the active data model."""
         name = name.replace("std::", "")
         if name in self.scalars:
             kind, bits = self.scalars[name]
@@ -133,9 +155,11 @@ class _Importer:
         return None
 
     def _base_type(self, n):
-        """-> ('scalar', kind, bits) | ('agg', Struct) | ('unresolved', text)"""
+        """Resolve a type node to ('scalar', kind, bits), ('agg', Struct) or
+        ('unresolved', text). Typedefs are followed; enums are sized as int."""
         t = n.type
         if t == "primitive_type" or t == "sized_type_specifier":
+            # signedness does not change size, so ignore it
             words = [w for w in _txt(n).split() if w not in ("signed", "unsigned")]
             spelling = " ".join(words) or "int"
             if spelling in ("char", "short", "int", "long", "long long"):
@@ -176,12 +200,15 @@ class _Importer:
         return ("unresolved", _txt(n))
 
     def _apply_declarator(self, base, d):
+        """A typedef of a pointer (typedef T *p_t) is pointer-sized; otherwise unchanged."""
         if d.type == "pointer_declarator":
             return ("scalar", "integer", self.model["pointer"])
         return base
 
     def _declarator(self, d):
-        """-> (name, pointer, dims(list of nodes), is_func)"""
+        """Unwrap a declarator -> (name, is_pointer, array size nodes in
+        source order, is_function). Function declarators (not pointers) are
+        methods/prototypes and are skipped by the caller."""
         pointer = func = False
         dims = []
         while d is not None:
@@ -202,11 +229,17 @@ class _Importer:
 
     # ---- layout ------------------------------------------------------------
     def _layout(self, spec_node, name):
+        """Lay out a struct/union/class specifier and return a Struct.
+
+        `off` is the running bit offset (structs); `size` the largest member
+        (unions); `maxalign` the strictest member alignment, which pads the
+        total. `unknown` poisons the total once any member's size is unknown.
+        """
         key = spec_node.id
         if key in self.cache:
             return self.cache[key]
         st = Struct(name or "anonymous")
-        self.cache[key] = st
+        self.cache[key] = st   # registered before recursing so self-referential types terminate
         union = spec_node.type == "union_specifier"
         unknown = False
         off = 0
@@ -225,7 +258,7 @@ class _Importer:
             decls = f.children_by_field_name("declarator")
             bf = next((c for c in f.children if c.type == "bitfield_clause"), None)
             if not decls:
-                # anonymous struct/union member: flatten
+                # anonymous struct/union member: its fields become ours (flatten)
                 base = self._base_type(ty)
                 if base[0] == "agg" and ty.type in _AGG:
                     sub = base[1]
@@ -255,6 +288,9 @@ class _Importer:
                 member, bits, align = self._member(mname, base, st)
                 if dims:
                     member.lower, member.upper = (0, None) if dynamic else (count, count)
+                # bit-field: occupies `width` bits, and starts a new storage unit
+                # (of the declared type's size) if it would straddle one; width 0
+                # forces alignment to the next unit
                 if bf is not None and bits is not None:
                     width = self._eval(bf.named_children[0]) if bf.named_children else None
                     if width is None:
@@ -277,7 +313,7 @@ class _Importer:
                 if bits is None or dynamic or unknown:
                     unknown = True
                     continue
-                total = bits * count
+                total = bits * count   # arrays: element size x element count
                 maxalign = max(maxalign, align)
                 if union:
                     size = max(size, total)
@@ -292,7 +328,9 @@ class _Importer:
         return st
 
     def _member(self, name, base, owner):
-        """-> (Member, bits, align)"""
+        """Build the Member for a resolved type -> (Member, bits, alignment in
+        bits). Aggregates are recorded in owner.nested so the emitter can
+        define them. Alignment is capped at 128 bits."""
         if base[0] == "scalar":
             _, kind, bits = base
             return Member(name, kind, bits), bits, min(bits, 128)
@@ -306,6 +344,7 @@ class _Importer:
         return Member(name, "unresolved", None, base[1]), None, 8
 
     def _struct_align(self, s):
+        """Approximate alignment of a nested struct: its widest scalar member."""
         a = 8
         for m in s.members:
             if m.bits:
@@ -313,6 +352,7 @@ class _Importer:
         return a
 
     def run(self, element):
+        """Entry point: lay out the aggregate called `element`."""
         node = self.aggs.get(element)
         if node is None:
             raise ImportError_(f"no struct/union/class named '{element}' found")
@@ -320,6 +360,7 @@ class _Importer:
 
 
 class _CImporter(Importer):
+    """Shared by C and C++; subclasses only choose the tree-sitter grammar via `origin`."""
     origin = "C"
 
     def import_type(self, source, element, data_model=None):

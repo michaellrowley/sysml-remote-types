@@ -63,12 +63,13 @@ def render_region(struct, types, ind):
     return "\n".join(lines)
 
 
-def load_layout(link, data_model=None, text=None):
-    source = text if text is not None else fetch.fetch(link.uri)
+def load_layout(link, data_model=None, text=None, max_bytes=fetch.DEFAULT_MAX_BYTES):
+    source = text if text is not None else fetch.fetch(link.uri, max_bytes)
     return languages.get(link.origin).import_type(source, link.element, data_model)
 
 
-def expand(text, data_model=None, fetcher=None, warn=lambda m: None):
+def expand(text, data_model=None, fetcher=None, warn=lambda m: None,
+           max_bytes=fetch.DEFAULT_MAX_BYTES):
     """Return text with every TypeLink-bearing definition body fleshed out."""
     types = specmod.load_types()
     tree = sysml.parse(text)
@@ -78,7 +79,7 @@ def expand(text, data_model=None, fetcher=None, warn=lambda m: None):
         body = link.definition
         if body is None or body.LBRACE() is None or body.start.start in edits:
             continue
-        res = load_layout(link, data_model, fetcher(link.uri) if fetcher else None)
+        res = load_layout(link, data_model, fetcher(link.uri) if fetcher else None, max_bytes)
         for w in res.warnings:
             warn(f"{link.element}: {w}")
         first = link.link_ctx.start

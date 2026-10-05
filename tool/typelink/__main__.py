@@ -2,7 +2,7 @@ import argparse
 import json
 import sys
 
-from . import emit, parser, spec, sysml
+from . import emit, fetch, parser, spec, sysml
 from .model import ImportError_
 
 
@@ -16,6 +16,8 @@ def main(argv=None):
     e.add_argument("file")
     e.add_argument("-o", "--output", help="write here instead of stdout")
     e.add_argument("--data-model", choices=models, help="C/C++ data model (default from spec)")
+    e.add_argument("--max-bytes", type=int, default=fetch.DEFAULT_MAX_BYTES,
+                   help="refuse linked resources larger than this (default: %(default)s)")
     sub.add_parser("sync-spec", help="embed spec files into spec/RFC.md")
     args = ap.parse_args(argv)
 
@@ -25,7 +27,7 @@ def main(argv=None):
     try:
         if args.cmd == "expand":
             with open(args.file) as fh:
-                out = emit.expand(fh.read(), args.data_model,
+                out = emit.expand(fh.read(), args.data_model, max_bytes=args.max_bytes,
                                   warn=lambda m: print("warning:", m, file=sys.stderr))
             if args.output:
                 with open(args.output, "w") as fh:

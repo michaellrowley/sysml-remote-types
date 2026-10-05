@@ -1,10 +1,9 @@
 """Retrieves the resource a TypeLink uri points at."""
 import re
 import urllib.request
-from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-MAX_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_BYTES = 8 * 1024 ** 2
 _GH_BLOB = re.compile(r"^/([^/]+)/([^/]+)/blob/(.+)$")
 
 
@@ -18,14 +17,17 @@ def raw_url(uri):
     return uri
 
 
-def fetch(uri):
+def fetch(uri, max_bytes=DEFAULT_MAX_BYTES):
+    """Return the text at uri; http(s) and file: only. Larger than max_bytes is an error."""
     u = urlparse(uri)
     if u.scheme == "file":
-        return Path(unquote(u.path)).read_text(errors="replace")
-    if u.scheme not in ("http", "https"):
+        with open(unquote(u.path), "rb") as f:
+            data = f.read(max_bytes + 1)
+    elif u.scheme in ("http", "https"):
+        with urllib.request.urlopen(raw_url(uri), timeout=30) as r:
+            data = r.read(max_bytes + 1)
+    else:
         raise ValueError(f"unsupported uri scheme '{u.scheme}' in {uri}")
-    with urllib.request.urlopen(raw_url(uri), timeout=30) as r:
-        data = r.read(MAX_BYTES + 1)
-    if len(data) > MAX_BYTES:
-        raise ValueError(f"{uri} exceeds {MAX_BYTES} bytes")
+    if len(data) > max_bytes:
+        raise ValueError(f"{uri} exceeds {max_bytes} bytes (see --max-bytes)")
     return data.decode("utf-8", "replace")

@@ -113,6 +113,8 @@ class ExpandTests(unittest.TestCase):
         self.assertIn("bits = 320", out)
         with self.assertRaises(ValueError):
             expand_with("C", "nope", C_SRC)
+        with self.assertRaises(ValueError):
+            emit.expand(LINK % ("pkt", "C", Path(f.name).as_uri()), max_bytes=10)
 
     def test_keyword_member_quoted(self):
         out = expand_with("C", "k", "struct k { int part; };")

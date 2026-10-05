@@ -20,3 +20,48 @@ Grammars are pinned git submodules in `tool/third_party/` (clone with
 
 Protobuf uses the pinned `proto-schema-parser` package. Language support is a registry
 (`tool/typelink/languages/`); see its docstring for how to add Rust or others.
+
+## Worked example: `expand`
+
+Given `packet.h`:
+
+```c
+#include <stdint.h>
+struct header { uint8_t type; uint16_t len; };
+struct packet { struct header hdr; uint8_t payload[4]; };
+```
+
+and a model that only links to it:
+
+```sysml
+item def packet {
+    @TypeLink {
+        origin = TypeOrigin::C;
+        uri = "https://example.com/packet.h";
+    }
+}
+```
+
+`python3 -m typelink expand model.sysml` fills in the body (sizes are in bits; the
+generated region sits between the `typelink:` markers and is replaced on re-runs):
+
+```sysml
+item def packet {
+    @TypeLink {
+        origin = TypeOrigin::C;
+        uri = "https://example.com/packet.h";
+    }
+    // typelink:begin (generated from the linked type; edits are overwritten)
+    @DataSize { bits = 64; }
+    item def header {
+        @DataSize { bits = 32; }
+        attribute 'type' : ScalarValues::Integer { @DataSize { bits = 8; } }
+        attribute len : ScalarValues::Integer { @DataSize { bits = 16; } }
+    }
+    item hdr : header { @DataSize { bits = 32; } }
+    attribute payload : ScalarValues::Integer[4] { @DataSize { bits = 8; } }
+    // typelink:end
+}
+```
+
+Linked files larger than 8 MiB are refused; change this with `--max-bytes N`.
