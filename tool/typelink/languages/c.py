@@ -30,20 +30,22 @@ def _txt(n):
 class _Importer:
     """One parse of one source file; resolves types and lays out aggregates."""
 
-    def __init__(self, source, origin, model_name):
+    def __init__(self, source, origin, model_name, additional_sources=()):
         types = specmod.load_types()
         self.sysml_types = types["sysml"]
         self.scalars = types["c_scalars"]
         self.model = types["data_models"][model_name or types["default_data_model"]]
         self.warnings = []
         parser = Parser(get_language(*_GRAMMARS[origin]))
-        self.root = parser.parse(source.encode()).root_node
+        self.roots = [parser.parse(text.encode()).root_node
+                      for text in (source, *additional_sources)]
         self.aggs = {}       # tag/typedef name -> specifier node
         self.aliases = {}    # typedef name -> (type node, declarator node)
         self.enums = set()   # enum tag/typedef names (laid out as int)
         self.defines = {}    # #define / enumerator name -> replacement text (for array sizes)
         self.cache = {}      # specifier node id -> Struct; also stops recursive types
-        self._collect(self.root)
+        for root in self.roots:
+            self._collect(root)
 
     # ---- symbol collection -------------------------------------------------
     def _collect(self, node):
@@ -363,8 +365,8 @@ class _CImporter(Importer):
     """Shared by C and C++; subclasses only choose the tree-sitter grammar via `origin`."""
     origin = "C"
 
-    def import_type(self, source, element, data_model=None):
-        return _Importer(source, self.origin, data_model).run(element)
+    def import_type(self, source, element, data_model=None, additional_sources=()):
+        return _Importer(source, self.origin, data_model, additional_sources).run(element)
 
 
 @register("C")

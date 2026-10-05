@@ -1,7 +1,7 @@
 """Renders imported layouts as SysMLv2 and expands TypeLink items in a model."""
 import re
 
-from . import fetch, languages, parser, spec as specmod, sysml
+from . import fetch, languages, parser, repository, spec as specmod, sysml
 from .model import ImportError_
 
 BEGIN = "// typelink:begin (generated from the linked type; edits are overwritten)"
@@ -63,14 +63,18 @@ def render_region(struct, types, ind):
     return "\n".join(lines)
 
 
-def load_layout(link, data_model=None, text=None, max_bytes=fetch.DEFAULT_MAX_BYTES):
+def load_layout(link, data_model=None, text=None, max_bytes=fetch.DEFAULT_MAX_BYTES,
+                additional_sources=()):
     source = text if text is not None else fetch.fetch(link.uri, max_bytes)
-    return languages.get(link.origin).import_type(source, link.element, data_model)
+    return languages.get(link.origin).import_type(
+        source, link.element, data_model, additional_sources)
 
 
 def expand(text, data_model=None, fetcher=None, warn=lambda m: None,
-           max_bytes=fetch.DEFAULT_MAX_BYTES):
+           max_bytes=fetch.DEFAULT_MAX_BYTES, clone_repo=False, additional_sources=()):
     """Return text with every TypeLink-bearing definition body fleshed out."""
+    if clone_repo and fetcher is not None:
+        raise ValueError("fetcher and clone_repo cannot be used together")
     types = specmod.load_types()
     tree = sysml.parse(text)
     links = parser.extract(tree)
@@ -79,7 +83,14 @@ def expand(text, data_model=None, fetcher=None, warn=lambda m: None,
         body = link.definition
         if body is None or body.LBRACE() is None or body.start.start in edits:
             continue
-        res = load_layout(link, data_model, fetcher(link.uri) if fetcher else None, max_bytes)
+        repo_sources = ()
+        if clone_repo:
+            source, repo_sources = repository.fetch_sources(
+                link.uri, link.origin, max_bytes)
+        else:
+            source = fetcher(link.uri) if fetcher else None
+        res = load_layout(link, data_model, source, max_bytes,
+                          (*additional_sources, *repo_sources))
         for w in res.warnings:
             warn(f"{link.element}: {w}")
         first = link.link_ctx.start
