@@ -30,6 +30,27 @@ item def packet {
 }
 ```
 
+For example, given this `packet.h`:
+
+```c
+#include <stdint.h>
+struct header { uint8_t type; uint16_t len; };
+struct packet { struct header hdr; uint8_t payload[4]; };
+```
+
+`typelink expand` generates the linked members and their known sizes:
+
+```sysml
+@DataSize { bits = 64; }
+item def header {
+    @DataSize { bits = 32; }
+    attribute 'type' : ScalarValues::Integer { @DataSize { bits = 8; } }
+    attribute len : ScalarValues::Integer { @DataSize { bits = 16; } }
+}
+item hdr : header { @DataSize { bits = 32; } }
+attribute payload : ScalarValues::Integer[4] { @DataSize { bits = 8; } }
+```
+
 Run the tool from `tool/` to validate links or generate the item's body:
 
 ```sh
@@ -52,9 +73,6 @@ same option as `clone_repo=True`; importers also accept `additional_sources`
 for callers that already manage source context. This indexes matching files
 repo-wide; it does not run a compiler/preprocessor or infer build-target
 include paths. Git submodule contents are not included.
-
-Grammars are pinned git submodules in `tool/third_party/` (clone with
-`--recurse-submodules`, or run `git submodule update --init`):
 
 ## Grammar dependencies
 
