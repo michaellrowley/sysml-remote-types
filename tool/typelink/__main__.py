@@ -18,6 +18,8 @@ def main(argv=None):
     e.add_argument("--data-model", choices=models, help="C/C++ data model (default from spec)")
     e.add_argument("--max-bytes", type=int, default=fetch.DEFAULT_MAX_BYTES,
                    help="refuse linked resources larger than this (default: %(default)s)")
+    e.add_argument("--clone-repo", action="store_true",
+                   help="clone GitHub repositories temporarily to resolve types across files")
     sub.add_parser("sync-spec", help="embed spec files into spec/RFC.md")
     args = ap.parse_args(argv)
 
@@ -28,6 +30,7 @@ def main(argv=None):
         if args.cmd == "expand":
             with open(args.file) as fh:
                 out = emit.expand(fh.read(), args.data_model, max_bytes=args.max_bytes,
+                                  clone_repo=args.clone_repo,
                                   warn=lambda m: print("warning:", m, file=sys.stderr))
             if args.output:
                 with open(args.output, "w") as fh:
