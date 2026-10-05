@@ -1,7 +1,7 @@
 """Renders imported layouts as SysMLv2 and expands TypeLink items in a model."""
 import re
 
-from . import c_import, fetch, parser, proto_import, spec as specmod, sysml
+from . import fetch, languages, parser, spec as specmod, sysml
 from .model import ImportError_
 
 BEGIN = "// typelink:begin (generated from the linked type; edits are overwritten)"
@@ -65,11 +65,7 @@ def render_region(struct, types, ind):
 
 def load_layout(link, data_model=None, text=None):
     source = text if text is not None else fetch.fetch(link.uri)
-    if link.origin in ("C", "CPP"):
-        return c_import.import_c(source, link.element, link.origin, data_model)
-    if link.origin == "Protobuf":
-        return proto_import.import_proto(source, link.element)
-    raise ImportError_(f"no importer for origin {link.origin}")
+    return languages.get(link.origin).import_type(source, link.element, data_model)
 
 
 def expand(text, data_model=None, fetcher=None, warn=lambda m: None):

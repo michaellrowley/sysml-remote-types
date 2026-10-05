@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from typelink import emit, parser, spec, sysml  # noqa: E402
+from typelink import emit, languages, parser, spec, sysml  # noqa: E402
 
 LINK = '''item def %s {
     @TypeLink {
@@ -41,6 +41,9 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(s.origins, ["C", "CPP", "Protobuf"])
         self.assertEqual(s.link_attrs, {"origin": "TypeOrigin", "uri": "String"})
         self.assertEqual(s.metadata["DataSize"], {"bits": "Natural"})
+
+    def test_every_origin_has_importer(self):
+        self.assertEqual(sorted(spec.load().origins), languages.origins())
 
     def test_rfc_in_sync(self):
         self.assertTrue(spec.sync_rfc(write=False))

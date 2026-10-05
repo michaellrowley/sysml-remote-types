@@ -3,11 +3,12 @@ from proto_schema_parser import Parser
 from proto_schema_parser import ast
 from proto_schema_parser.ast import FieldCardinality
 
-from . import spec as specmod
-from .model import ImportError_, Member, Result, Struct
+from .. import spec as specmod
+from ..model import ImportError_, Member, Result, Struct
+from . import Importer, register
 
 
-def import_proto(source, element):
+def _import_proto(source, element):
     scalars = specmod.load_types()["protobuf_scalars"]
     f = Parser().parse(source)
     messages, enums = {}, set()
@@ -70,3 +71,9 @@ def import_proto(source, element):
         return st
 
     return Result(build(element), warnings)
+
+
+@register("Protobuf")
+class ProtobufImporter(Importer):
+    def import_type(self, source, element, data_model=None):
+        return _import_proto(source, element)

@@ -1,14 +1,15 @@
 """C / C++ struct importer built on tree-sitter."""
 import re
 
-import tree_sitter_c
-import tree_sitter_cpp
-from tree_sitter import Language, Parser
+from .. import spec as specmod
+from ..model import ImportError_, Member, Result, Struct, align_up
+from ..treesitter import get_language
+from tree_sitter import Parser
+from . import Importer, register
 
-from . import spec as specmod
-from .model import ImportError_, Member, Result, Struct, align_up
-
-_LANGS = {"C": tree_sitter_c.language, "CPP": tree_sitter_cpp.language}
+# grammar submodules under third_party/ and their exported entry points
+_GRAMMARS = {"C": ("tree-sitter-c", "tree_sitter_c"),
+             "CPP": ("tree-sitter-cpp", "tree_sitter_cpp")}
 _AGG = ("struct_specifier", "union_specifier", "class_specifier")
 _INT_SUFFIX = re.compile(r"[uUlL]+$")
 
@@ -24,7 +25,7 @@ class _Importer:
         self.scalars = types["c_scalars"]
         self.model = types["data_models"][model_name or types["default_data_model"]]
         self.warnings = []
-        parser = Parser(Language(_LANGS[origin]()))
+        parser = Parser(get_language(*_GRAMMARS[origin]))
         self.root = parser.parse(source.encode()).root_node
         self.aggs = {}       # tag/typedef name -> specifier node
         self.aliases = {}    # typedef name -> type node
@@ -102,7 +103,7 @@ class _Importer:
             v = self.defines.get(_txt(n))
             if v is None:
                 return None
-            sub = Parser(Language(tree_sitter_c.language())).parse((v + ";").encode()).root_node
+            sub = Parser(get_language(*_GRAMMARS["C"])).parse((v + ";").encode()).root_node
             e = sub.named_children[0] if sub.named_children else None
             if e is not None and e.type == "expression_statement":
                 e = e.named_children[0] if e.named_children else None
@@ -318,5 +319,18 @@ class _Importer:
         return Result(self._layout(node, element), self.warnings)
 
 
-def import_c(source, element, origin="C", data_model=None):
-    return _Importer(source, origin, data_model).run(element)
+class _CImporter(Importer):
+    origin = "C"
+
+    def import_type(self, source, element, data_model=None):
+        return _Importer(source, self.origin, data_model).run(element)
+
+
+@register("C")
+class CImporter(_CImporter):
+    origin = "C"
+
+
+@register("CPP")
+class CppImporter(_CImporter):
+    origin = "CPP"
