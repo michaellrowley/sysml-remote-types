@@ -1,37 +1,25 @@
-# sysml-remote-types
-The specification lives in `spec/` (`RFC.md` is the normative text; it embeds
-`typelink.sysml` and `types.json`, which the tool reads). The tool is in `tool/`:
+# SysML Remote Type Links
 
-    pip install -r tool/requirements.txt
-    cd tool
-    python3 -m typelink check model.sysml          # validate @TypeLink usages
-    python3 -m typelink expand model.sysml         # generate full item bodies
-    python3 -m unittest discover -s tests
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![SysML v2](https://img.shields.io/badge/SysML-v2-4c6.svg)](spec/RFC.md)
+[![Type sources](https://img.shields.io/badge/type%20sources-C%20%7C%20C%2B%2B%20%7C%20Protobuf-556b2f.svg)](spec/RFC.md)
 
-Grammars are pinned git submodules in `tool/third_party/` (clone with
-`--recurse-submodules`, or run `git submodule update --init`):
+Reference external C, C++, or Protobuf types from SysMLv2, then generate
+SysML item bodies from those definitions. The project includes both the
+`@TypeLink` specification and a command-line tool to validate links and expand
+them with member types and known sizes.
 
-- [daltskin/sysml-v2-grammar](https://github.com/daltskin/sysml-v2-grammar) - SysMLv2
-  (ANTLR; the generated parser is committed in `tool/typelink/_sysml/`, rebuild with
-  `tool/regen_grammar.sh`)
-- [tree-sitter/tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) and
-  [tree-sitter-cpp](https://github.com/tree-sitter/tree-sitter-cpp) - C / C++ (compiled
-  on first use with `cc`)
+## Quick start
 
-Protobuf uses the pinned `proto-schema-parser` package. Language support is a registry
-(`tool/typelink/languages/`); see its docstring for how to add Rust or others.
+Clone with the pinned grammar submodules, then install the tool dependencies:
 
-## Worked example: `expand`
-
-Given `packet.h`:
-
-```c
-#include <stdint.h>
-struct header { uint8_t type; uint16_t len; };
-struct packet { struct header hdr; uint8_t payload[4]; };
+```sh
+git clone --recurse-submodules https://github.com/michaellrowley/sysml-remote-types.git
+cd sysml-remote-types
+pip install -r tool/requirements.txt
 ```
 
-and a model that only links to it:
+Add a link to a SysMLv2 item:
 
 ```sysml
 item def packet {
@@ -42,26 +30,23 @@ item def packet {
 }
 ```
 
-`python3 -m typelink expand model.sysml` fills in the body (sizes are in bits; the
-generated region sits between the `typelink:` markers and is replaced on re-runs):
+Run the tool from `tool/` to validate links or generate the item's body:
 
-```sysml
-item def packet {
-    @TypeLink {
-        origin = TypeOrigin::C;
-        uri = "https://example.com/packet.h";
-    }
-    // typelink:begin (generated from the linked type; edits are overwritten)
-    @DataSize { bits = 64; }
-    item def header {
-        @DataSize { bits = 32; }
-        attribute 'type' : ScalarValues::Integer { @DataSize { bits = 8; } }
-        attribute len : ScalarValues::Integer { @DataSize { bits = 16; } }
-    }
-    item hdr : header { @DataSize { bits = 32; } }
-    attribute payload : ScalarValues::Integer[4] { @DataSize { bits = 8; } }
-    // typelink:end
-}
+```sh
+cd tool
+python3 -m typelink check model.sysml
+python3 -m typelink expand model.sysml
+python3 -m unittest discover -s tests
 ```
 
-Linked files larger than 8 MiB are refused; change this with `--max-bytes N`.
+Expansion writes generated content between `typelink:begin` and `typelink:end`
+markers; re-running it replaces that region. See the [RFC](spec/RFC.md) for
+the metadata definition, sizing rules, and supported formats.
+
+## Grammar dependencies
+
+The grammars are pinned submodules in `tool/third_party/`. If you cloned
+without `--recurse-submodules`, initialize them with
+`git submodule update --init`. SysMLv2's generated parser is committed in
+`tool/typelink/_sysml/`; rebuild it with `tool/regen_grammar.sh`. The C and C++
+grammars are compiled on first use with `cc`.
