@@ -16,8 +16,11 @@ Clone with the pinned grammar submodules, then install the tool dependencies:
 ```sh
 git clone --recurse-submodules https://github.com/michaellrowley/sysml-remote-types.git
 cd sysml-remote-types
-pip install -r tool/requirements.txt
+git submodule update --init --recursive && python -m pip install -e ./tool
 ```
+
+After installation, `typelink` is available on `PATH` from any working
+directory (keep the repository checkout in place). For example:
 
 Add a link to a SysMLv2 item:
 
@@ -51,13 +54,11 @@ item hdr : header { @DataSize { bits = 32; } }
 attribute payload : ScalarValues::Integer[4] { @DataSize { bits = 8; } }
 ```
 
-Run the tool from `tool/` to validate links or generate the item's body:
+Run the tool to validate links or generate the item's body:
 
 ```sh
-cd tool
-python3 -m typelink check model.sysml
-python3 -m typelink expand model.sysml
-python3 -m unittest discover -s tests
+typelink check model.sysml
+typelink expand model.sysml
 ```
 
 Expansion writes generated content between `typelink:begin` and `typelink:end`
