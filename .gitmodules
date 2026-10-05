@@ -1,0 +1,9 @@
+[submodule "tool/third_party/sysml-v2-grammar"]
+	path = tool/third_party/sysml-v2-grammar
+	url = https://github.com/daltskin/sysml-v2-grammar
+[submodule "tool/third_party/tree-sitter-c"]
+	path = tool/third_party/tree-sitter-c
+	url = https://github.com/tree-sitter/tree-sitter-c
+[submodule "tool/third_party/tree-sitter-cpp"]
+	path = tool/third_party/tree-sitter-cpp
+	url = https://github.com/tree-sitter/tree-sitter-cpp
