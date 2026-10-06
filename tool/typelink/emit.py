@@ -36,6 +36,10 @@ def render_members(struct, types, ind, emitted):
             continue
         emitted.add(sub.name)
         out.append(f"{ind}item def {quote(sub.name)} {{")
+        if sub.layout_kind:
+            layout = {"struct": "Struct", "union": "Union",
+                      "protobuf": "Protobuf"}[sub.layout_kind]
+            out.append(f"{ind}    @DataLayout {{ kind = DataLayoutKind::{layout}; }}")
         if sub.bits is not None:
             out.append(f"{ind}    @DataSize {{ bits = {sub.bits}; }}")
         out += render_members(sub, types, ind + "    ", emitted)
@@ -43,6 +47,22 @@ def render_members(struct, types, ind, emitted):
     sysml_types = types["sysml"]
     for m in struct.members:
         n, mult = quote(m.name), _mult(m)
+        if m.offset_bits is not None:
+            out.append(f"{ind}@DataOffset {{ bits = {m.offset_bits}; }}")
+        if m.signed is not None:
+            signed = "true" if m.signed else "false"
+            out.append(f"{ind}@DataSigned {{ value = {signed}; }}")
+        if m.wire is not None:
+            kind = m.wire.kind.title()
+            out.append(
+                f'{ind}@DataEncoding {{ field_number = {m.wire.number}; '
+                f'kind = DataEncodingKind::{kind}; wire_type = {m.wire.wire_type}; '
+                f'source_type = "{m.wire.source_type}"; '
+                f'packed = {"true" if m.wire.packed else "false"}; }}')
+            if m.wire.kind == "map":
+                out.append(
+                    f'{ind}@DataMap {{ key_type = "{m.wire.key_type}"; '
+                    f'value_type = "{m.wire.value_type}"; }}')
         if m.kind == "unresolved":
             out.append(f"{ind}ref item {n} : {quote(m.type_name)}{mult};")
             continue
@@ -55,6 +75,10 @@ def render_members(struct, types, ind, emitted):
 
 def render_region(struct, types, ind):
     lines = [ind + BEGIN]
+    if struct.layout_kind:
+        layout = {"struct": "Struct", "union": "Union",
+                  "protobuf": "Protobuf"}[struct.layout_kind]
+        lines.append(f"{ind}@DataLayout {{ kind = DataLayoutKind::{layout}; }}")
     size = _size(struct.bits, ind)
     if size:
         lines.append(ind + size)

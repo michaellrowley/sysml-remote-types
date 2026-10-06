@@ -46,6 +46,8 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(s.origins, ["C", "CPP", "Protobuf"])
         self.assertEqual(s.link_attrs, {"origin": "TypeOrigin", "uri": "String"})
         self.assertEqual(s.metadata["DataSize"], {"bits": "Natural"})
+        self.assertEqual(s.metadata["DataOffset"], {"bits": "Natural"})
+        self.assertEqual(s.metadata["DataEncoding"]["field_number"], "Natural")
 
     def test_every_origin_has_importer(self):
         self.assertEqual(sorted(spec.load().origins), languages.origins())
@@ -109,6 +111,9 @@ class ExpandTests(unittest.TestCase):
     def test_c(self):
         out = expand_with("C", "pkt", C_SRC)
         self.assertIn("@DataSize { bits = 320; }", out)
+        self.assertIn("@DataLayout { kind = DataLayoutKind::Struct; }", out)
+        self.assertIn("@DataOffset { bits = 16; }", out)
+        self.assertIn("@DataSigned { value = false; }", out)
         self.assertIn("item 'in' : inner_t[4] { @DataSize { bits = 32; } }", out)
         self.assertIn("item def inner_t", out)
         self.assertIn("attribute p : ScalarValues::Integer { @DataSize { bits = 64; } }", out)
@@ -140,7 +145,14 @@ class ExpandTests(unittest.TestCase):
     def test_bitfields(self):
         out = expand_with("C", "bits", C_SRC)
         self.assertIn("attribute x : ScalarValues::Integer { @DataSize { bits = 3; } }", out)
-        self.assertIn("@DataSize { bits = 32; }", out)
+        self.assertIn("@DataSize { bits = 64; }", out)
+        self.assertIn("@DataOffset { bits = 32; }", out)
+        self.assertIn("@DataOffset { bits = 35; }", out)
+
+    def test_union_layout_metadata(self):
+        out = expand_with("C", "u", C_SRC)
+        self.assertIn("@DataLayout { kind = DataLayoutKind::Union; }", out)
+        self.assertEqual(out.count("@DataOffset { bits = 0; }"), 2)
 
     def test_unresolved_has_no_total(self):
         warnings = []
@@ -151,8 +163,34 @@ class ExpandTests(unittest.TestCase):
 
     def test_protobuf(self):
         out = expand_with("Protobuf", "Msg", PROTO_SRC)
+        self.assertIn("@DataLayout { kind = DataLayoutKind::Protobuf; }", out)
+        self.assertIn(
+            "@DataEncoding { field_number = 1; kind = DataEncodingKind::Varint; "
+            'wire_type = 0; source_type = "int32"; packed = false; }', out)
         self.assertIn("attribute tags : ScalarValues::String[0..*];", out)
         self.assertIn("item def Inner", out)
+
+    def test_protobuf_preserves_wire_kinds_and_map_types(self):
+        source = '''syntax = "proto3";
+message Child { fixed32 id = 1; }
+message Packet {
+    sint32 delta = 1;
+    repeated int32 values = 2;
+    Child child = 3;
+    map<string, int64> counts = 4;
+}'''
+        out = expand_with("Protobuf", "Packet", source)
+        self.assertIn(
+            "@DataEncoding { field_number = 1; kind = DataEncodingKind::Zigzag; "
+            'wire_type = 0; source_type = "sint32"; packed = false; }', out)
+        self.assertIn(
+            "@DataEncoding { field_number = 2; kind = DataEncodingKind::Varint; "
+            'wire_type = 2; source_type = "int32"; packed = true; }', out)
+        self.assertIn(
+            "@DataEncoding { field_number = 4; kind = DataEncodingKind::Map; "
+            'wire_type = 2; source_type = "map"; packed = false; }', out)
+        self.assertIn(
+            '@DataMap { key_type = "string"; value_type = "int64"; }', out)
 
     def test_protobuf_additional_source_resolves_message(self):
         out = expand_with(
