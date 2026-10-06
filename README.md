@@ -41,17 +41,35 @@ struct header { uint8_t type; uint16_t len; };
 struct packet { struct header hdr; uint8_t payload[4]; };
 ```
 
-`typelink expand` generates the linked members and their known sizes:
+`typelink expand` generates the members, sizes, source layout kind, and member
+offsets:
 
 ```sysml
+@DataLayout { kind = DataLayoutKind::Struct; }
 @DataSize { bits = 64; }
 item def header {
+    @DataLayout { kind = DataLayoutKind::Struct; }
     @DataSize { bits = 32; }
-    attribute 'type' : ScalarValues::Integer { @DataSize { bits = 8; } }
-    attribute len : ScalarValues::Integer { @DataSize { bits = 16; } }
+    attribute 'type' : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+        @DataSigned { value = false; }
+    }
+    attribute len : ScalarValues::Integer {
+        @DataSize { bits = 16; }
+        @DataOffset { bits = 16; }
+        @DataSigned { value = false; }
+    }
 }
-item hdr : header { @DataSize { bits = 32; } }
-attribute payload : ScalarValues::Integer[4] { @DataSize { bits = 8; } }
+item hdr : header {
+    @DataSize { bits = 32; }
+    @DataOffset { bits = 0; }
+}
+attribute payload : ScalarValues::Integer[4] {
+    @DataSize { bits = 8; }
+    @DataOffset { bits = 32; }
+    @DataSigned { value = false; }
+}
 ```
 
 Run the tool to validate links or generate the item's body:
@@ -64,6 +82,47 @@ typelink expand model.sysml
 Expansion writes generated content between `typelink:begin` and `typelink:end`
 markers; re-running it replaces that region. See the [RFC](spec/RFC.md) for
 the metadata definition, sizing rules, and supported formats.
+
+## Generate Kaitai Struct schemas
+
+`typelink kaitai` resolves `@TypeLink` annotations, expands the SysMLv2 items,
+and writes a Kaitai Struct `.ksy` schema. For native SysML items with explicit
+data types and `@DataSize`, it treats fields as a packed sequence. Select an
+item with `--item` when the file contains more than one top-level item:
+
+```sh
+typelink kaitai examples/packet.sysml --item Packet -o packet.ksy
+```
+
+The checked-in [SysML input](examples/packet.sysml) and
+[generated schema](examples/packet.ksy) show the native packed layout. To
+generate from a model that was expanded separately, pass `--expanded`:
+
+```sh
+typelink expand model.sysml -o expanded.sysml
+typelink kaitai expanded.sysml --item packet --expanded -o packet.ksy
+```
+
+For C/C++ links, expansion records member offsets, signedness, struct/union
+kind, and sizes; the Kaitai generator inserts padding at the recorded offsets.
+Unions are emitted as opaque byte regions because SysML has no discriminator
+that selects a union member. For Protobuf links, expansion retains field
+numbers, wire kinds, packed-field information, map key/value types, and nested
+messages; the generator emits a tagged wire parser rather than treating a
+message as an in-memory struct.
+
+Useful options include `--endian le|be` and `--bit-endian le|be` for native and
+C/C++ fields (both default to little-endian), and `--integer-signedness` to
+choose `signed` or `unsigned` for native SysML `Integer` fields (default
+unsigned). `--data-model` selects C/C++ widths during expansion;
+`--clone-repo` and `--max-bytes` control GitHub source resolution. Protobuf
+fixed-width wire values always use their specified little-endian encoding, and
+Protobuf varints use their defined high-bit continuation order. The generated
+Protobuf `fields` array preserves wire order; consumers interpret a field by
+its tag. See
+`typelink kaitai --help` and the
+[RFC](spec/RFC.md#7-kaitai-generation) for the complete mapping and
+limitations.
 
 Additionally, Expansion reads only the linked file by default. Pass `--clone-repo` to clone
 the repository for GitHub `blob` URLs into a temporary directory and include

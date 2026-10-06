@@ -25,6 +25,7 @@ class WireField:
     packed: bool = False
     key_type: Optional[str] = None
     value_type: Optional[str] = None
+    value_kind: Optional[str] = None
 
 
 @dataclass

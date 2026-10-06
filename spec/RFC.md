@@ -41,6 +41,7 @@ package TypeLinkMetadata {
         enum Enum;
         enum Map;
         enum Group;
+        enum Unresolved;
     }
     metadata def TypeLink {
         doc /* Indicates that a given item/type which uses this TypeLink will
@@ -88,6 +89,7 @@ package TypeLinkMetadata {
              */
         attribute key_type : String;
         attribute value_type : String;
+        attribute value_kind : String;
     }
 }
 ```
@@ -195,3 +197,84 @@ The expanded output MUST itself be valid SysMLv2.
 }
 ```
 <!-- END types.json -->
+
+## 6. Binary layout metadata
+
+Expansion adds metadata needed to describe binary layouts without asking the
+Kaitai generator to infer missing facts:
+
+- `@DataLayout { kind = DataLayoutKind::Struct; }` marks a C/C++ struct or
+  class. `@DataOffset { bits = N; }` on each member records its start offset
+  from the containing item. `@DataSigned { value = true|false; }` records
+  integer signedness when the source type specifies it. C/C++ unions use
+  `DataLayoutKind::Union`; their members all have offset zero.
+- Protobuf message definitions use `DataLayoutKind::Protobuf`. Every field
+  carries `@DataEncoding` with its field number, wire kind, numeric wire type,
+  source type, and declared packed setting. Map fields also carry `@DataMap`
+  with their key type, value type, and whether the value is scalar, enum,
+  message, or unresolved. Repeated packable fields record the source packed
+  setting; a decoder accepts both packed and unpacked representations.
+- With no `@DataLayout`, an item is a native SysML packed sequence. Its members
+  still need enough type and `@DataSize` information to determine their
+  representation.
+
+Offsets use bits, like `DataSize`. The C/C++ importer records offsets under the
+same natural-alignment model used to compute `DataSize`, including bit-field
+storage units. `#pragma pack`, compiler-specific attributes, and base classes
+remain unsupported. C `char` signedness is implementation-defined and is not
+recorded unless explicit in the source. Protobuf maps and nested messages retain
+their wire-level type information; deprecated groups are marked but cannot be
+emitted as Kaitai schemas.
+
+## 7. Kaitai generation
+
+The `kaitai` command expands `@TypeLink` items by default, then generates one
+`.ksy` schema for one SysML item definition:
+
+```sh
+typelink kaitai model.sysml --item packet -o packet.ksy
+```
+
+If the input has exactly one top-level item, `--item` may be omitted. When a
+model has already been expanded, `--expanded` skips fetching and expansion:
+
+```sh
+typelink expand model.sysml -o expanded.sysml
+typelink kaitai expanded.sysml --item packet --expanded -o packet.ksy
+```
+
+The command also accepts `--data-model`, `--clone-repo`, and `--max-bytes` for
+the expansion step. `--endian le|be` sets byte order for native and C/C++
+fields (default `le`); `--bit-endian le|be` sets KSY bit-field order (default
+`le`). `--integer-signedness signed|unsigned` chooses a default for native
+`ScalarValues::Integer` fields when no `DataSigned` annotation is present
+(default `unsigned`). Protobuf fixed-width values are always little-endian as
+required by its wire format.
+
+Field mappings:
+
+- `Integer`, `Natural`, and `Positive` use `u1`, `u2`, `u4`, or `u8` for
+  byte-sized widths; other widths up to 64 bits use `bN`. Signed integer
+  bit-fields expose a sign-extended `*_signed` instance.
+- `Real` supports 32- and 64-bit fields as `f4` and `f8`. `Boolean` uses
+  `u1` for 8-bit fields and `bN` for other widths. `String` requires a known,
+  byte-aligned `DataSize` and is emitted as a UTF-8 `str`.
+- Fixed multiplicities become `repeat: expr`. A final `0..*` field becomes
+  `repeat: eos`; other bounded variable multiplicities, unresolved types,
+  unknown scalar sizes, and unsupported real widths are errors rather than
+  guessed output.
+- C/C++ structs use `DataOffset` and `DataSize` to add inter-member and tail
+  padding. Unions consume their known size as opaque bytes because no
+  discriminator identifies which union member to decode.
+- Protobuf fields are parsed in wire order as a repeated `fields` sequence.
+  Each entry dispatches by its encoded tag, decoding varints (including signed
+  and zig-zag values), fixed-width values, strings, bytes, nested messages,
+  packed repeated values, and map entries. Unknown fields with wire types 0, 1,
+  2, and 5 remain parseable as raw values; groups (wire types 3 and 4) are
+  unsupported. Consumers interpret entries by tag; the `fields` sequence
+  preserves wire order and does not collapse oneof or repeated-field semantics.
+
+The generator normalizes item and field names to Kaitai identifiers. It emits
+the selected item as the schema root and its nested item definitions as Kaitai
+types. `examples/packet.sysml` and `examples/packet.ksy` are a native packed
+SysML input and its generated output.

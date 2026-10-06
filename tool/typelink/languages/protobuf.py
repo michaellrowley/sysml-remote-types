@@ -54,8 +54,18 @@ def _import_proto(source, element, additional_sources=()):
 
     def wire_field(fld, card, message_name):
         if isinstance(fld, ast.MapField):
+            value_name = fld.value_type.split(".")[-1]
+            if value_name in _WIRE_TYPES:
+                value_kind = "scalar"
+            elif value_name in enums:
+                value_kind = "enum"
+            elif value_name in messages:
+                value_kind = "message"
+            else:
+                value_kind = "unresolved"
             return WireField(fld.number, "map", "map", 2,
-                             key_type=fld.key_type, value_type=fld.value_type)
+                             key_type=fld.key_type, value_type=fld.value_type,
+                             value_kind=value_kind)
         if isinstance(fld, ast.Group):
             return WireField(fld.number, "group", fld.name, 3)
         source_type = fld.type
@@ -67,7 +77,7 @@ def _import_proto(source, element, additional_sources=()):
         elif short_type in messages:
             kind, wire_type = "message", 2
         else:
-            kind, wire_type = "group", 3
+            kind, wire_type = "unresolved", 0
         packable = kind in ("varint", "zigzag", "fixed32", "fixed64", "enum")
         packed_option = next(
             (option.value for option in getattr(fld, "options", ())
@@ -92,6 +102,11 @@ def _import_proto(source, element, additional_sources=()):
                 m = Member(fld.name, "unresolved", None,
                            f"map<{fld.key_type}, {fld.value_type}>", 0, None,
                            wire=wire)
+                value_name = fld.value_type.split(".")[-1]
+                if value_name in messages:
+                    sub = build(value_name)
+                    if sub is not st and sub not in st.nested:
+                        st.nested.append(sub)
                 warnings.append(f"{name}.{fld.name}: map fields are variable-length")
             elif isinstance(fld, ast.Group):
                 m = Member(fld.name, "unresolved", None, fld.name, wire=wire)
@@ -104,7 +119,7 @@ def _import_proto(source, element, additional_sources=()):
                     m = Member(fld.name, "integer", 32, wire=wire)
                 elif t in messages:
                     sub = build(t)
-                    if sub not in st.nested:
+                    if sub is not st and sub not in st.nested:
                         st.nested.append(sub)
                     m = Member(fld.name, "struct", None, sub.name, wire=wire)
                 else:

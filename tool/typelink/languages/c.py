@@ -274,7 +274,8 @@ class _Importer:
                 base = self._base_type(ty)
                 if base[0] == "agg" and ty.type in _AGG:
                     sub = base[1]
-                    sub_offset = 0 if union else align_up(off, self._struct_align(sub))
+                    sub_align = min(self._struct_align(sub), 128)
+                    sub_offset = 0 if union else align_up(off, sub_align)
                     st.members += [
                         replace(m, offset_bits=(
                             sub_offset + m.offset_bits
@@ -286,8 +287,8 @@ class _Importer:
                         unknown = True
                         offset_known = False
                     else:
-                        a = 8
                         off = sub_offset + sub.bits if not union else off
+                        maxalign = max(maxalign, sub_align)
                         size = max(size, sub.bits)
                 continue
             for d in decls:
@@ -375,6 +376,14 @@ class _Importer:
         if pointer or n is None or depth > 8:
             return False if pointer else None
         text = _txt(n).strip()
+        scalar = self._scalar(text)
+        if scalar is not None:
+            if scalar[0] != "integer":
+                return None
+            if text.startswith("uint") or text in ("size_t", "uintptr_t"):
+                return False
+            if text.startswith("int") or text in ("ssize_t", "intptr_t"):
+                return True
         if n.type in ("primitive_type", "sized_type_specifier"):
             words = text.split()
             if any(word in words for word in ("float", "double", "bool", "_Bool")):

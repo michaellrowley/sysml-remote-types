@@ -23,6 +23,7 @@ package TypeLinkMetadata {
         enum Enum;
         enum Map;
         enum Group;
+        enum Unresolved;
     }
     metadata def TypeLink {
         doc /* Indicates that a given item/type which uses this TypeLink will
@@ -70,5 +71,6 @@ package TypeLinkMetadata {
              */
         attribute key_type : String;
         attribute value_type : String;
+        attribute value_kind : String;
     }
 }
