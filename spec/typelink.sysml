@@ -35,15 +35,16 @@ package TypeLinkMetadata {
     metadata def DataSize {
         doc /* Size, in bits, of one instance of the annotated member, or of the
              * whole item when it annotates an item definition (including any
-             * padding the origin's layout rules insert). Absent when the size
+             * padding required by the represented layout). Absent when the size
              * is variable or unknown.
              */
         attribute bits : Natural;
     }
     metadata def DataLayout {
-        doc /* Layout semantics for Kaitai generation. Struct and Union describe
-             * C/C++ object layouts; Protobuf describes its tagged wire format.
-             * With no DataLayout, fields are a packed sequence.
+        doc /* Layout semantics for Kaitai generation. Struct describes an
+             * offset-based layout; Union describes overlapping members;
+             * Protobuf describes its tagged wire format. With no DataLayout,
+             * fields are a packed sequence.
              */
         attribute kind : DataLayoutKind;
     }
@@ -53,12 +54,12 @@ package TypeLinkMetadata {
         attribute bits : Natural;
     }
     metadata def DataSigned {
-        doc /* Whether an integer member is signed when its source type says so.
+        doc /* Signedness of an integer member in the imported type definition.
              */
         attribute value : Boolean;
     }
     metadata def DataEncoding {
-        doc /* Protobuf wire information retained for Kaitai generation.
+        doc /* Tagged-wire information retained for Kaitai generation.
              */
         attribute field_number : Natural;
         attribute kind : DataEncodingKind;
@@ -67,7 +68,7 @@ package TypeLinkMetadata {
         attribute packed : Boolean;
     }
     metadata def DataMap {
-        doc /* Key and value types for a Protobuf map entry.
+        doc /* Key and value types for a tagged-wire map entry.
              */
         attribute key_type : String;
         attribute value_type : String;

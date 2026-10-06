@@ -318,7 +318,7 @@ def _seq_lines(item, items, integer_signedness):
         if item.layout == "struct":
             if member.offset is None:
                 raise KaitaiError(
-                    f"{item.name}.{member.name}: C/C++ layout has no known DataOffset")
+                    f"{item.name}.{member.name}: offset-based layout has no known DataOffset")
             if member.offset < cursor:
                 raise KaitaiError(
                     f"{item.name}.{member.name}: DataOffset overlaps the preceding member")

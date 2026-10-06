@@ -2,7 +2,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import nullcontext, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -266,26 +266,64 @@ class KaitaiTests(unittest.TestCase):
         self.assertIn("type: u1", out)
         self.assertIn("type: str\n    size: 3", out)
 
-    def test_c_member_offsets_generate_padding(self):
-        expanded = expand_with(
-            "C", "packet",
-            "#include <stdint.h>\n"
-            "struct packet { uint8_t tag; uint32_t length; };")
-        out = kaitai.generate(expanded)
+    def test_imported_struct_layout_generates_padding(self):
+        imported_model = '''item def Packet {
+    @DataLayout { kind = DataLayoutKind::Struct; }
+    @DataSize { bits = 64; }
+    attribute tag : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+        @DataSigned { value = false; }
+    }
+    attribute length : ScalarValues::Integer {
+        @DataSize { bits = 32; }
+        @DataOffset { bits = 32; }
+        @DataSigned { value = false; }
+    }
+}'''
+        out = kaitai.generate(imported_model)
         self.assertIn("  - id: tag\n    type: u1", out)
         self.assertIn("  - id: padding_0\n    size: 3", out)
         self.assertIn("  - id: length\n    type: u4", out)
 
     def test_union_is_preserved_as_opaque_bytes(self):
-        expanded = expand_with("C", "sample", "union sample { uint8_t a; uint32_t b; };")
-        out = kaitai.generate(expanded)
+        imported_model = '''item def Sample {
+    @DataLayout { kind = DataLayoutKind::Union; }
+    @DataSize { bits = 32; }
+    attribute a : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+    }
+    attribute b : ScalarValues::Integer {
+        @DataSize { bits = 32; }
+        @DataOffset { bits = 0; }
+    }
+}'''
+        out = kaitai.generate(imported_model)
         self.assertIn("  - id: data\n    size: 4", out)
         self.assertNotIn("  - id: a", out)
         self.assertNotIn("  - id: b", out)
 
-    def test_c_bitfield_offsets_and_signed_values_are_preserved(self):
-        expanded = expand_with("C", "bits", C_SRC)
-        out = kaitai.generate(expanded)
+    def test_imported_bitfield_offsets_and_signed_values_are_preserved(self):
+        imported_model = '''item def Bits {
+    @DataLayout { kind = DataLayoutKind::Struct; }
+    @DataSize { bits = 64; }
+    attribute prefix : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+    }
+    attribute x : ScalarValues::Integer {
+        @DataSize { bits = 3; }
+        @DataOffset { bits = 32; }
+        @DataSigned { value = true; }
+    }
+    attribute y : ScalarValues::Integer {
+        @DataSize { bits = 6; }
+        @DataOffset { bits = 35; }
+        @DataSigned { value = true; }
+    }
+}'''
+        out = kaitai.generate(imported_model)
         self.assertIn("  - id: padding_0\n    size: 3", out)
         self.assertIn("  - id: x\n    type: b3", out)
         self.assertIn("  - id: y\n    type: b6", out)
@@ -590,6 +628,12 @@ class CliTests(unittest.TestCase):
                 expand.assert_not_called()
                 generate.assert_called_once()
                 self.assertEqual(output_path.read_text(), "file schema")
+
+    def test_kaitai_does_not_expose_importer_data_model_option(self):
+        with tempfile.NamedTemporaryFile("w") as source, redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                main(["kaitai", source.name, "--data-model", "lp64"])
+        self.assertEqual(result.exception.code, 2)
 
 
 if __name__ == "__main__":

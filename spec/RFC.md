@@ -53,15 +53,16 @@ package TypeLinkMetadata {
     metadata def DataSize {
         doc /* Size, in bits, of one instance of the annotated member, or of the
              * whole item when it annotates an item definition (including any
-             * padding the origin's layout rules insert). Absent when the size
+             * padding required by the represented layout). Absent when the size
              * is variable or unknown.
              */
         attribute bits : Natural;
     }
     metadata def DataLayout {
-        doc /* Layout semantics for Kaitai generation. Struct and Union describe
-             * C/C++ object layouts; Protobuf describes its tagged wire format.
-             * With no DataLayout, fields are a packed sequence.
+        doc /* Layout semantics for Kaitai generation. Struct describes an
+             * offset-based layout; Union describes overlapping members;
+             * Protobuf describes its tagged wire format. With no DataLayout,
+             * fields are a packed sequence.
              */
         attribute kind : DataLayoutKind;
     }
@@ -71,12 +72,12 @@ package TypeLinkMetadata {
         attribute bits : Natural;
     }
     metadata def DataSigned {
-        doc /* Whether an integer member is signed when its source type says so.
+        doc /* Signedness of an integer member in the imported type definition.
              */
         attribute value : Boolean;
     }
     metadata def DataEncoding {
-        doc /* Protobuf wire information retained for Kaitai generation.
+        doc /* Tagged-wire information retained for Kaitai generation.
              */
         attribute field_number : Natural;
         attribute kind : DataEncodingKind;
@@ -85,7 +86,7 @@ package TypeLinkMetadata {
         attribute packed : Boolean;
     }
     metadata def DataMap {
-        doc /* Key and value types for a Protobuf map entry.
+        doc /* Key and value types for a tagged-wire map entry.
              */
         attribute key_type : String;
         attribute value_type : String;
@@ -153,6 +154,8 @@ Sizes:
   fields packed within their declared type's storage unit, union size = largest
   member, and total size padded to the largest alignment. `#pragma pack` and
   base classes are not modelled (a total size is then omitted for base classes).
+  Implementation-defined `char` signedness is recorded only when known
+  explicitly.
 - `Protobuf`: member size is the nominal declared width from `protobuf_scalars`;
   `string`/`bytes`, maps and messages have no size. No total is given, as wire
   size is variable.
@@ -203,27 +206,24 @@ The expanded output MUST itself be valid SysMLv2.
 Expansion adds metadata needed to describe binary layouts without asking the
 Kaitai generator to infer missing facts:
 
-- `@DataLayout { kind = DataLayoutKind::Struct; }` marks a C/C++ struct or
-  class. `@DataOffset { bits = N; }` on each member records its start offset
-  from the containing item. `@DataSigned { value = true|false; }` records
-  integer signedness when the source type specifies it. C/C++ unions use
-  `DataLayoutKind::Union`; their members all have offset zero.
-- Protobuf message definitions use `DataLayoutKind::Protobuf`. Every field
+- `@DataLayout { kind = DataLayoutKind::Struct; }` marks an offset-based
+  structure. `@DataOffset { bits = N; }` on each member records its start
+  offset from the containing item. `@DataSigned { value = true|false; }`
+  records integer signedness when it is known. `DataLayoutKind::Union` marks
+  overlapping members.
+- Tagged-wire message definitions use `DataLayoutKind::Protobuf`. Every field
   carries `@DataEncoding` with its field number, wire kind, numeric wire type,
   source type, and declared packed setting. Map fields also carry `@DataMap`
   with their key type, value type, and whether the value is scalar, enum,
-  message, or unresolved. Repeated packable fields record the source packed
+  message, or unresolved. Repeated packable fields record the declared packed
   setting; a decoder accepts both packed and unpacked representations.
-- With no `@DataLayout`, an item is a native SysML packed sequence. Its members
-  still need enough type and `@DataSize` information to determine their
-  representation.
+- With no `@DataLayout`, an item is a packed sequence. Its members still need
+  enough type and `@DataSize` information to determine their representation.
 
-Offsets use bits, like `DataSize`. The C/C++ importer records offsets under the
-same natural-alignment model used to compute `DataSize`, including bit-field
-storage units. `#pragma pack`, compiler-specific attributes, and base classes
-remain unsupported. C `char` signedness is implementation-defined and is not
-recorded unless explicit in the source. Protobuf maps and nested messages retain
-their wire-level type information; deprecated groups are marked but cannot be
+Offsets use bits, like `DataSize`. Layout metadata describes the imported
+representation; generation consumes these facts as recorded and does not infer
+source-language layout rules. Tagged-wire maps and nested messages retain their
+wire-level type information; deprecated groups are marked but cannot be
 emitted as Kaitai schemas.
 
 ## 7. Kaitai generation
@@ -243,13 +243,14 @@ typelink expand model.sysml -o expanded.sysml
 typelink kaitai expanded.sysml --item packet --expanded -o packet.ksy
 ```
 
-The command also accepts `--data-model`, `--clone-repo`, and `--max-bytes` for
-the expansion step. `--endian le|be` sets byte order for native and C/C++
-fields (default `le`); `--bit-endian le|be` sets KSY bit-field order (default
-`le`). `--integer-signedness signed|unsigned` chooses a default for native
-`ScalarValues::Integer` fields when no `DataSigned` annotation is present
-(default `unsigned`). Protobuf fixed-width values are always little-endian as
-required by its wire format.
+The command also accepts `--clone-repo` and `--max-bytes` for the optional
+expansion step. `--endian le|be` sets byte order for fixed-width fields whose
+encoding does not specify one (default `le`); `--bit-endian le|be` sets KSY
+bit-field order (default `le`). `--integer-signedness signed|unsigned` chooses
+a default for `ScalarValues::Integer` fields when no `DataSigned` annotation
+is present (default `unsigned`). Protocol-defined fixed-width values retain
+their required byte order. For other import settings, run `typelink expand`
+first (for example, to set `--data-model`), then generate with `--expanded`.
 
 Field mappings:
 
@@ -263,10 +264,10 @@ Field mappings:
   `repeat: eos`; other bounded variable multiplicities, unresolved types,
   unknown scalar sizes, and unsupported real widths are errors rather than
   guessed output.
-- C/C++ structs use `DataOffset` and `DataSize` to add inter-member and tail
-  padding. Unions consume their known size as opaque bytes because no
-  discriminator identifies which union member to decode.
-- Protobuf fields are parsed in wire order as a repeated `fields` sequence.
+- Offset-based structures use `DataOffset` and `DataSize` to add inter-member
+  and tail padding. Unions consume their known size as opaque bytes because no
+  discriminator identifies which member to decode.
+- Tagged-wire fields are parsed in wire order as a repeated `fields` sequence.
   Each entry dispatches by its encoded tag, decoding varints (including signed
   and zig-zag values), fixed-width values, strings, bytes, nested messages,
   packed repeated values, and map entries. Unknown fields with wire types 0, 1,

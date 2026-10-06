@@ -25,21 +25,19 @@ def main(argv=None):
     k.add_argument("--item", help="item definition to use as the Kaitai root")
     k.add_argument("-o", "--output", help="write here instead of stdout")
     k.add_argument("--expanded", action="store_true",
-                   help="input is already expanded; do not resolve @TypeLink")
-    k.add_argument("--data-model", choices=models,
-                   help="C/C++ data model (default from spec)")
+                   help="skip @TypeLink resolution for imported SysMLv2 input")
     k.add_argument("--max-bytes", type=int, default=fetch.DEFAULT_MAX_BYTES,
                    help="refuse linked resources larger than this (default: %(default)s)")
     k.add_argument("--clone-repo", action="store_true",
                    help="clone GitHub repositories temporarily to resolve types across files")
     k.add_argument("--endian", choices=("le", "be"), default="le",
-                   help="byte order for native and C/C++ fields (default: %(default)s)")
+                   help="byte order when not defined by the layout (default: %(default)s)")
     k.add_argument("--bit-endian", choices=("le", "be"), default="le",
-                   help="bit order for native/C/C++ bit fields; Protobuf uses be "
+                   help="bit order for packed and offset-based fields; tagged wire uses be "
                    "(default: %(default)s)")
     k.add_argument("--integer-signedness", choices=("signed", "unsigned"),
                    default="unsigned",
-                   help="default for native SysML Integer fields (default: %(default)s)")
+                   help="default for Integer fields without metadata (default: %(default)s)")
     sub.add_parser("sync-spec", help="embed spec files into spec/RFC.md")
     args = ap.parse_args(argv)
 
@@ -63,7 +61,7 @@ def main(argv=None):
                 text = fh.read()
             if not args.expanded:
                 text = emit.expand(
-                    text, args.data_model, max_bytes=args.max_bytes,
+                    text, max_bytes=args.max_bytes,
                     clone_repo=args.clone_repo,
                     warn=lambda m: print("warning:", m, file=sys.stderr))
             out = kaitai.generate(
