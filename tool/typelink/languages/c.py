@@ -9,6 +9,7 @@ warning and makes the enclosing total size unknown (None) rather than guessed.
 Not modelled: #pragma pack, __attribute__((packed/aligned)), templates.
 """
 import re
+from dataclasses import replace
 
 from .. import spec as specmod
 from ..model import ImportError_, Member, Result, Struct, align_up
@@ -240,17 +241,22 @@ class _Importer:
         key = spec_node.id
         if key in self.cache:
             return self.cache[key]
-        st = Struct(name or "anonymous")
+        st = Struct(name or "anonymous",
+                    layout_kind="union" if spec_node.type == "union_specifier" else "struct")
         self.cache[key] = st   # registered before recursing so self-referential types terminate
         union = spec_node.type == "union_specifier"
         unknown = False
+        offset_known = True
         off = 0
         maxalign = 8
         size = 0
+        bit_start = bit_unit_bits = None
+        bit_used = 0
         body = spec_node.child_by_field_name("body")
         if any(c.type == "base_class_clause" for c in spec_node.children):
             self.warnings.append(f"{st.name}: base classes are not laid out; total size unknown")
             unknown = True
+            offset_known = False
         for f in body.named_children:
             if f.type != "field_declaration":
                 continue
@@ -260,17 +266,29 @@ class _Importer:
             decls = f.children_by_field_name("declarator")
             bf = next((c for c in f.children if c.type == "bitfield_clause"), None)
             if not decls:
+                if bit_unit_bits is not None and not union:
+                    off = max(off, bit_start + bit_unit_bits)
+                    bit_start = bit_unit_bits = None
+                    bit_used = 0
                 # anonymous struct/union member: its fields become ours (flatten)
                 base = self._base_type(ty)
                 if base[0] == "agg" and ty.type in _AGG:
                     sub = base[1]
-                    st.members += sub.members
+                    sub_align = min(self._struct_align(sub), 128)
+                    sub_offset = 0 if union else align_up(off, sub_align)
+                    st.members += [
+                        replace(m, offset_bits=(
+                            sub_offset + m.offset_bits
+                            if offset_known and m.offset_bits is not None else None))
+                        for m in sub.members
+                    ]
                     st.nested += sub.nested
                     if sub.bits is None:
                         unknown = True
+                        offset_known = False
                     else:
-                        a = 8
-                        off = align_up(off, a) + sub.bits if not union else off
+                        off = sub_offset + sub.bits if not union else off
+                        maxalign = max(maxalign, sub_align)
                         size = max(size, sub.bits)
                 continue
             for d in decls:
@@ -288,8 +306,16 @@ class _Importer:
                 if dims and dynamic:
                     self.warnings.append(f"{st.name}.{mname}: array size is not a constant; sized as variable")
                 member, bits, align = self._member(mname, base, st)
+                if member.kind == "integer":
+                    member.signed = self._signedness(ty, pointer)
+                if union:
+                    member.offset_bits = 0
                 if dims:
                     member.lower, member.upper = (0, None) if dynamic else (count, count)
+                if bf is None and bit_unit_bits is not None and not union:
+                    off = max(off, bit_start + bit_unit_bits)
+                    bit_start = bit_unit_bits = None
+                    bit_used = 0
                 # bit-field: occupies `width` bits, and starts a new storage unit
                 # (of the declared type's size) if it would straddle one; width 0
                 # forces alignment to the next unit
@@ -297,30 +323,46 @@ class _Importer:
                     width = self._eval(bf.named_children[0]) if bf.named_children else None
                     if width is None:
                         unknown = True
+                        offset_known = False
                     elif width == 0:
+                        if bit_unit_bits is not None and not union:
+                            off = max(off, bit_start + bit_unit_bits)
+                            bit_start = bit_unit_bits = None
+                            bit_used = 0
                         off = align_up(off, bits)
                         continue
                     else:
-                        if not union and (off % bits) + width > bits:
-                            off = align_up(off, bits)
                         member.bits = width
                         st.members.append(member)
                         if union:
-                            size = max(size, width)
+                            size = max(size, bits)
                         else:
-                            off += width
+                            if bit_unit_bits != bits or bit_used + width > bits:
+                                if bit_unit_bits is not None:
+                                    off = max(off, bit_start + bit_unit_bits)
+                                bit_start = align_up(off, bits)
+                                bit_unit_bits = bits
+                                bit_used = 0
+                            member.offset_bits = (
+                                bit_start + bit_used if offset_known else None)
+                            bit_used += width
+                            off = bit_start + bit_used
                         maxalign = max(maxalign, align or 8)
                         continue
                 st.members.append(member)
                 if bits is None or dynamic or unknown:
                     unknown = True
+                    offset_known = False
                     continue
                 total = bits * count   # arrays: element size x element count
                 maxalign = max(maxalign, align)
                 if union:
                     size = max(size, total)
                 else:
+                    member.offset_bits = align_up(off, align) if offset_known else None
                     off = align_up(off, align) + total
+        if bit_unit_bits is not None and not union:
+            off = max(off, bit_start + bit_unit_bits)
         if unknown:
             st.bits = None
         elif union:
@@ -328,6 +370,46 @@ class _Importer:
         else:
             st.bits = align_up(off, maxalign)
         return st
+
+    def _signedness(self, n, pointer=False, depth=0):
+        """Return known integer signedness, following simple typedef aliases."""
+        if pointer or n is None or depth > 8:
+            return False if pointer else None
+        text = _txt(n).strip()
+        scalar = self._scalar(text)
+        if scalar is not None:
+            if scalar[0] != "integer":
+                return None
+            if text.startswith("uint") or text in ("size_t", "uintptr_t"):
+                return False
+            if text.startswith("int") or text in ("ssize_t", "intptr_t"):
+                return True
+        if n.type in ("primitive_type", "sized_type_specifier"):
+            words = text.split()
+            if any(word in words for word in ("float", "double", "bool", "_Bool")):
+                return None
+            if "unsigned" in words:
+                return False
+            if "signed" in words:
+                return True
+            if "char" in words:
+                return None
+            return True
+        if n.type in ("type_identifier", "qualified_identifier"):
+            name = text.split("::")[-1]
+            if name.startswith("uint") or name in ("size_t", "uintptr_t"):
+                return False
+            if name.startswith("int") or name in ("ssize_t", "intptr_t"):
+                return True
+            if name in self.enums:
+                return True
+            if name in self.aliases:
+                ty, declarator = self.aliases[name]
+                alias_pointer = self._declarator(declarator)[1]
+                return self._signedness(ty, alias_pointer, depth + 1)
+        if n.type == "enum_specifier":
+            return True
+        return None
 
     def _member(self, name, base, owner):
         """Build the Member for a resolved type -> (Member, bits, alignment in

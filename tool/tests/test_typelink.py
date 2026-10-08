@@ -2,14 +2,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import nullcontext, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from typelink import emit, fetch, languages, parser, repository, spec, sysml  # noqa: E402
+from typelink import emit, fetch, kaitai, languages, parser, repository, spec, sysml  # noqa: E402
 from typelink.__main__ import main  # noqa: E402
 
 LINK = '''item def %s {
@@ -46,6 +46,8 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(s.origins, ["C", "CPP", "Protobuf"])
         self.assertEqual(s.link_attrs, {"origin": "TypeOrigin", "uri": "String"})
         self.assertEqual(s.metadata["DataSize"], {"bits": "Natural"})
+        self.assertEqual(s.metadata["DataOffset"], {"bits": "Natural"})
+        self.assertEqual(s.metadata["DataEncoding"]["field_number"], "Natural")
 
     def test_every_origin_has_importer(self):
         self.assertEqual(sorted(spec.load().origins), languages.origins())
@@ -109,9 +111,15 @@ class ExpandTests(unittest.TestCase):
     def test_c(self):
         out = expand_with("C", "pkt", C_SRC)
         self.assertIn("@DataSize { bits = 320; }", out)
-        self.assertIn("item 'in' : inner_t[4] { @DataSize { bits = 32; } }", out)
+        self.assertIn("@DataLayout { kind = DataLayoutKind::Struct; }", out)
+        self.assertIn("@DataOffset { bits = 16; }", out)
+        self.assertIn("@DataSigned { value = false; }", out)
+        self.assertEqual(out.count("@DataSigned { value = false; }"), 4)
+        self.assertIn("item 'in' : inner_t[4] {", out)
+        self.assertIn("@DataSize { bits = 32; }", out)
         self.assertIn("item def inner_t", out)
-        self.assertIn("attribute p : ScalarValues::Integer { @DataSize { bits = 64; } }", out)
+        self.assertIn("attribute p : ScalarValues::Integer {", out)
+        self.assertIn("@DataSize { bits = 64; }", out)
 
     def test_c_additional_source_resolves_aggregate(self):
         out = expand_with(
@@ -139,8 +147,16 @@ class ExpandTests(unittest.TestCase):
 
     def test_bitfields(self):
         out = expand_with("C", "bits", C_SRC)
-        self.assertIn("attribute x : ScalarValues::Integer { @DataSize { bits = 3; } }", out)
-        self.assertIn("@DataSize { bits = 32; }", out)
+        self.assertIn("attribute x : ScalarValues::Integer {", out)
+        self.assertIn("@DataSize { bits = 3; }", out)
+        self.assertIn("@DataSize { bits = 64; }", out)
+        self.assertIn("@DataOffset { bits = 32; }", out)
+        self.assertIn("@DataOffset { bits = 35; }", out)
+
+    def test_union_layout_metadata(self):
+        out = expand_with("C", "u", C_SRC)
+        self.assertIn("@DataLayout { kind = DataLayoutKind::Union; }", out)
+        self.assertEqual(out.count("@DataOffset { bits = 0; }"), 2)
 
     def test_unresolved_has_no_total(self):
         warnings = []
@@ -151,8 +167,35 @@ class ExpandTests(unittest.TestCase):
 
     def test_protobuf(self):
         out = expand_with("Protobuf", "Msg", PROTO_SRC)
-        self.assertIn("attribute tags : ScalarValues::String[0..*];", out)
+        self.assertIn("@DataLayout { kind = DataLayoutKind::Protobuf; }", out)
+        self.assertIn(
+            "@DataEncoding { field_number = 1; kind = DataEncodingKind::Varint; "
+            'wire_type = 0; source_type = "int32"; packed = false; }', out)
+        self.assertIn("attribute tags : ScalarValues::String[0..*] {", out)
         self.assertIn("item def Inner", out)
+
+    def test_protobuf_preserves_wire_kinds_and_map_types(self):
+        source = '''syntax = "proto3";
+message Child { fixed32 id = 1; }
+message Packet {
+    sint32 delta = 1;
+    repeated int32 values = 2;
+    Child child = 3;
+    map<string, int64> counts = 4;
+}'''
+        out = expand_with("Protobuf", "Packet", source)
+        self.assertIn(
+            "@DataEncoding { field_number = 1; kind = DataEncodingKind::Zigzag; "
+            'wire_type = 0; source_type = "sint32"; packed = false; }', out)
+        self.assertIn(
+            "@DataEncoding { field_number = 2; kind = DataEncodingKind::Varint; "
+            'wire_type = 2; source_type = "int32"; packed = true; }', out)
+        self.assertIn(
+            "@DataEncoding { field_number = 4; kind = DataEncodingKind::Map; "
+            'wire_type = 2; source_type = "map"; packed = false; }', out)
+        self.assertIn(
+            '@DataMap { key_type = "string"; value_type = "int64"; '
+            'value_kind = "scalar"; }', out)
 
     def test_protobuf_additional_source_resolves_message(self):
         out = expand_with(
@@ -184,6 +227,183 @@ class ExpandTests(unittest.TestCase):
     def test_keyword_member_quoted(self):
         out = expand_with("C", "k", "struct k { int part; };")
         self.assertIn("attribute 'part'", out)
+
+
+class KaitaiTests(unittest.TestCase):
+    def test_checked_in_example_matches_generated_schema(self):
+        root = Path(__file__).resolve().parents[2]
+        model = (root / "examples" / "packet.sysml").read_text()
+        expected = (root / "examples" / "packet.ksy").read_text()
+        self.assertEqual(kaitai.generate(model, item="Packet"), expected)
+
+    def test_native_item_is_a_packed_little_endian_sequence(self):
+        model = '''item def Packet {
+    attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+    attribute count : ScalarValues::Integer[2] { @DataSize { bits = 16; } }
+}'''
+        out = kaitai.generate(model)
+        self.assertIn("  id: packet", out)
+        self.assertIn("  endian: le", out)
+        self.assertIn("  - id: kind\n    type: u1", out)
+        self.assertIn(
+            "  - id: count\n    type: u2\n    repeat: expr\n    repeat-expr: 2",
+            out)
+        self.assertNotIn("padding_", out)
+
+    def test_native_scalar_mapping_and_signedness(self):
+        model = '''item def Values {
+    attribute signed_value : ScalarValues::Integer {
+        @DataSize { bits = 32; }
+        @DataSigned { value = true; }
+    }
+    attribute ratio : ScalarValues::Real { @DataSize { bits = 32; } }
+    attribute enabled : ScalarValues::Boolean { @DataSize { bits = 8; } }
+    attribute label : ScalarValues::String { @DataSize { bits = 24; } }
+}'''
+        out = kaitai.generate(model)
+        self.assertIn("type: s4", out)
+        self.assertIn("type: f4", out)
+        self.assertIn("type: u1", out)
+        self.assertIn("type: str\n    size: 3", out)
+
+    def test_imported_struct_layout_generates_padding(self):
+        imported_model = '''item def Packet {
+    @DataLayout { kind = DataLayoutKind::Struct; }
+    @DataSize { bits = 64; }
+    attribute tag : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+        @DataSigned { value = false; }
+    }
+    attribute length : ScalarValues::Integer {
+        @DataSize { bits = 32; }
+        @DataOffset { bits = 32; }
+        @DataSigned { value = false; }
+    }
+}'''
+        out = kaitai.generate(imported_model)
+        self.assertIn("  - id: tag\n    type: u1", out)
+        self.assertIn("  - id: padding_0\n    size: 3", out)
+        self.assertIn("  - id: length\n    type: u4", out)
+
+    def test_union_is_preserved_as_opaque_bytes(self):
+        imported_model = '''item def Sample {
+    @DataLayout { kind = DataLayoutKind::Union; }
+    @DataSize { bits = 32; }
+    attribute a : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+    }
+    attribute b : ScalarValues::Integer {
+        @DataSize { bits = 32; }
+        @DataOffset { bits = 0; }
+    }
+}'''
+        out = kaitai.generate(imported_model)
+        self.assertIn("  - id: data\n    size: 4", out)
+        self.assertNotIn("  - id: a", out)
+        self.assertNotIn("  - id: b", out)
+
+    def test_imported_bitfield_offsets_and_signed_values_are_preserved(self):
+        imported_model = '''item def Bits {
+    @DataLayout { kind = DataLayoutKind::Struct; }
+    @DataSize { bits = 64; }
+    attribute prefix : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+    }
+    attribute x : ScalarValues::Integer {
+        @DataSize { bits = 3; }
+        @DataOffset { bits = 32; }
+        @DataSigned { value = true; }
+    }
+    attribute y : ScalarValues::Integer {
+        @DataSize { bits = 6; }
+        @DataOffset { bits = 35; }
+        @DataSigned { value = true; }
+    }
+}'''
+        out = kaitai.generate(imported_model)
+        self.assertIn("  - id: padding_0\n    size: 3", out)
+        self.assertIn("  - id: x\n    type: b3", out)
+        self.assertIn("  - id: y\n    type: b6", out)
+        self.assertIn('value: "x >= 4 ? x - 8 : x"', out)
+        self.assertIn('value: "y >= 32 ? y - 64 : y"', out)
+
+    def test_protobuf_wire_fields_and_nested_types(self):
+        source = '''syntax = "proto3";
+message Child { fixed32 id = 1; }
+message Packet {
+    int32 id = 1;
+    repeated sint32 values = 2;
+    string name = 3;
+    Child child = 4;
+    map<string, int32> counts = 5;
+}'''
+        expanded = expand_with("Protobuf", "Packet", source)
+        out = kaitai.generate(expanded, item="Packet")
+        self.assertIn("type: pb_packet_field\n    repeat: eos", out)
+        self.assertIn("8: pb_packet_id_value", out)
+        self.assertIn("18: pb_packet_values_packed_packed", out)
+        self.assertIn("26: pb_packet_name_value", out)
+        self.assertIn("34: pb_packet_child_value", out)
+        self.assertIn("42: pb_packet_counts_value", out)
+        self.assertIn("type: packet__child", out)
+        self.assertIn("10: pb_packet_counts_entry_key", out)
+        self.assertIn("16: pb_packet_counts_entry_value", out)
+        self.assertIn("protobuf_unknown(tag.value % 8)", out)
+
+    def test_protobuf_enum_map_value_is_not_mistaken_for_message(self):
+        source = '''syntax = "proto3";
+enum Status { UNKNOWN = 0; READY = 1; }
+message Packet { map<string, Status> states = 1; }'''
+        expanded = expand_with("Protobuf", "Packet", source)
+        self.assertIn('value_kind = "enum"', expanded)
+        out = kaitai.generate(expanded)
+        self.assertIn("16: pb_packet_states_entry_value", out)
+
+    def test_unresolved_protobuf_field_is_not_assumed_to_be_a_group(self):
+        expanded = expand_with("Protobuf", "Packet",
+                               'syntax = "proto3"; message Packet { Missing item = 1; }')
+        self.assertIn("DataEncodingKind::Unresolved", expanded)
+        with self.assertRaisesRegex(kaitai.KaitaiError, "unresolved"):
+            kaitai.generate(expanded)
+
+    def test_protobuf_endian_is_fixed_by_wire_format(self):
+        expanded = expand_with("Protobuf", "Msg", PROTO_SRC)
+        with self.assertRaisesRegex(kaitai.KaitaiError, "always little-endian"):
+            kaitai.generate(expanded, endian="be")
+
+    def test_recursive_protobuf_message_uses_named_body_type(self):
+        source = '''syntax = "proto3";
+message Node {
+    Node next = 1;
+    int32 value = 2;
+}'''
+        expanded = expand_with("Protobuf", "Node", source)
+        out = kaitai.generate(expanded)
+        self.assertIn("  - id: message\n    type: node__body", out)
+        self.assertIn("  node__body:\n    seq:", out)
+        self.assertIn("type: node__body\n        size: length", out)
+
+    def test_native_signed_bit_field_gets_signed_instance(self):
+        model = '''item def Packed {
+    attribute delta : ScalarValues::Integer {
+        @DataSize { bits = 3; }
+        @DataSigned { value = true; }
+    }
+}'''
+        out = kaitai.generate(model)
+        self.assertIn("type: b3", out)
+        self.assertIn("delta_signed:", out)
+        self.assertIn('value: "delta >= 4 ? delta - 8 : delta"', out)
+
+    def test_selects_one_top_level_item(self):
+        model = '''item def First { attribute value : ScalarValues::Integer { @DataSize { bits = 8; } } }
+item def Second { attribute value : ScalarValues::Integer { @DataSize { bits = 8; } } }'''
+        with self.assertRaisesRegex(kaitai.KaitaiError, "--item"):
+            kaitai.generate(model)
+        self.assertIn("id: second", kaitai.generate(model, item="Second"))
 
 
 class RepositoryTests(unittest.TestCase):
@@ -377,6 +597,43 @@ class CliTests(unittest.TestCase):
                         self.assertEqual(main(["expand", model.name, *args]), 0)
                     self.assertEqual(output.getvalue(), "expanded")
                     self.assertIs(expand.call_args.kwargs["clone_repo"], expected)
+
+    def test_kaitai_expands_by_default_and_supports_expanded_input(self):
+        model = '''item def Packet {
+    attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+}'''
+        with tempfile.NamedTemporaryFile("w") as source:
+            source.write(model)
+            source.flush()
+            for args, should_expand in (([], True), (["--expanded"], False)):
+                output = StringIO()
+                with self.subTest(args=args), patch(
+                        "typelink.__main__.emit.expand", return_value=model) as expand, patch(
+                            "typelink.__main__.kaitai.generate", return_value="schema") as generate:
+                    with redirect_stdout(output):
+                        self.assertEqual(
+                            main(["kaitai", source.name, "--item", "Packet", *args]), 0)
+                    self.assertEqual(output.getvalue(), "schema")
+                    self.assertEqual(expand.called, should_expand)
+                    generate.assert_called_once()
+            with tempfile.TemporaryDirectory() as directory:
+                output_path = Path(directory) / "packet.ksy"
+                with patch(
+                        "typelink.__main__.emit.expand") as expand, patch(
+                            "typelink.__main__.kaitai.generate",
+                            return_value="file schema") as generate:
+                    self.assertEqual(main([
+                        "kaitai", source.name, "--item", "Packet", "--expanded",
+                        "--output", str(output_path)]), 0)
+                expand.assert_not_called()
+                generate.assert_called_once()
+                self.assertEqual(output_path.read_text(), "file schema")
+
+    def test_kaitai_does_not_expose_importer_data_model_option(self):
+        with tempfile.NamedTemporaryFile("w") as source, redirect_stderr(StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                main(["kaitai", source.name, "--data-model", "lp64"])
+        self.assertEqual(result.exception.code, 2)
 
 
 if __name__ == "__main__":

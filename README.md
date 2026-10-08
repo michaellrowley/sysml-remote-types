@@ -4,10 +4,9 @@
 [![SysML v2](https://img.shields.io/badge/SysML-v2-4c6.svg)](spec/RFC.md)
 [![Type sources](https://img.shields.io/badge/type%20sources-C%20%7C%20C%2B%2B%20%7C%20Protobuf-556b2f.svg)](spec/RFC.md)
 
-Reference external C, C++, or Protobuf types from SysMLv2, then generate
-SysML item bodies from those definitions. The project includes both the
-`@TypeLink` specification and a command-line tool to validate links and expand
-them with member types and known sizes.
+Use SysMLv2 `@TypeLink` annotations to import supported external types and
+generate their item bodies. The CLI also generates Kaitai Struct schemas from
+imported or native SysMLv2 models, independently of their source format.
 
 ## Quick start
 
@@ -41,17 +40,35 @@ struct header { uint8_t type; uint16_t len; };
 struct packet { struct header hdr; uint8_t payload[4]; };
 ```
 
-`typelink expand` generates the linked members and their known sizes:
+`typelink expand` generates the members, sizes, source layout kind, and member
+offsets:
 
 ```sysml
+@DataLayout { kind = DataLayoutKind::Struct; }
 @DataSize { bits = 64; }
 item def header {
+    @DataLayout { kind = DataLayoutKind::Struct; }
     @DataSize { bits = 32; }
-    attribute 'type' : ScalarValues::Integer { @DataSize { bits = 8; } }
-    attribute len : ScalarValues::Integer { @DataSize { bits = 16; } }
+    attribute 'type' : ScalarValues::Integer {
+        @DataSize { bits = 8; }
+        @DataOffset { bits = 0; }
+        @DataSigned { value = false; }
+    }
+    attribute len : ScalarValues::Integer {
+        @DataSize { bits = 16; }
+        @DataOffset { bits = 16; }
+        @DataSigned { value = false; }
+    }
 }
-item hdr : header { @DataSize { bits = 32; } }
-attribute payload : ScalarValues::Integer[4] { @DataSize { bits = 8; } }
+item hdr : header {
+    @DataSize { bits = 32; }
+    @DataOffset { bits = 0; }
+}
+attribute payload : ScalarValues::Integer[4] {
+    @DataSize { bits = 8; }
+    @DataOffset { bits = 32; }
+    @DataSigned { value = false; }
+}
 ```
 
 Run the tool to validate links or generate the item's body:
@@ -65,20 +82,64 @@ Expansion writes generated content between `typelink:begin` and `typelink:end`
 markers; re-running it replaces that region. See the [RFC](spec/RFC.md) for
 the metadata definition, sizing rules, and supported formats.
 
-Additionally, Expansion reads only the linked file by default. Pass `--clone-repo` to clone
-the repository for GitHub `blob` URLs into a temporary directory and include
-the repository's tracked C/C++ or Protobuf source files when resolving types.
-The checkout is removed after expansion. This is opt-in because cloning can be
-slow and repositories can be large. The Python `emit.expand` API exposes the
-same option as `clone_repo=True`; importers also accept `additional_sources`
-for callers that already manage source context. This indexes matching files
-repo-wide; it does not run a compiler/preprocessor or infer build-target
-include paths. Git submodule contents are not included.
+## Generate Kaitai Struct schemas
+
+`typelink kaitai` generates a Kaitai Struct `.ksy` schema from an imported
+SysMLv2 item. Generation uses the SysML structure and layout metadata only; it
+does not depend on the original source language or format. By default, the
+command also resolves `@TypeLink` annotations and expands their items first.
+For items without an explicit layout, fields with data types and `@DataSize`
+are treated as a packed sequence. Select an item with `--item` when the file
+contains more than one top-level item:
+
+```sh
+typelink kaitai examples/packet.sysml --item Packet -o packet.ksy
+```
+
+The checked-in [SysML input](examples/packet.sysml) and
+[generated schema](examples/packet.ksy) show the native packed layout. To
+generate from a model that was expanded separately, pass `--expanded`:
+
+```sh
+typelink expand model.sysml -o expanded.sysml
+typelink kaitai expanded.sysml --item packet --expanded -o packet.ksy
+```
+
+`DataLayout` distinguishes offset-based structures and overlapping unions from
+packed sequences. `DataOffset`, `DataSize`, and `DataSigned` provide the layout
+facts needed to generate fields and padding; unions are emitted as opaque byte
+regions because the model has no discriminator that selects a member. Tagged
+wire layouts can carry `DataEncoding` metadata for field tags, wire kinds,
+packed fields, maps, and nested types, allowing the generator to emit a wire
+parser rather than treating them as in-memory structures.
+
+`--endian le|be` and `--bit-endian le|be` control byte and bit order for
+layouts that do not define their own encoding (both default to little-endian).
+`--integer-signedness` chooses `signed` or `unsigned` for `Integer` fields
+without `DataSigned` metadata (default unsigned). Protocol-defined encodings
+retain their required byte and bit order. The generated tagged-wire `fields`
+array preserves wire order; consumers interpret a field by its tag. See
+`typelink kaitai --help` and the
+[RFC](spec/RFC.md#7-kaitai-generation) for the complete mapping and
+limitations.
+
+For other import settings, run `typelink expand` first (for example,
+`typelink expand model.sysml --data-model MODEL -o expanded.sysml`), then
+generate from the resulting SysMLv2 with `typelink kaitai --expanded`.
+
+The optional TypeLink expansion step reads only the linked file by default.
+`--max-bytes` caps the fetched resource; `--clone-repo` also indexes tracked
+files from its repository when resolving types. The temporary checkout is
+removed afterward and submodule contents are excluded. Repository indexing
+does not run compilers or infer build-target include paths. The Python
+`emit.expand` API also accepts `clone_repo=True` and `additional_sources` for
+callers that manage source context themselves.
 
 ## Grammar dependencies
 
 The grammars are pinned submodules in `tool/third_party/`. If you cloned
 without `--recurse-submodules`, initialize them with
 `git submodule update --init`. SysMLv2's generated parser is committed in
-`tool/typelink/_sysml/`; rebuild it with `tool/regen_grammar.sh`. The C and C++
-grammars are compiled on first use with `cc`.
+`tool/typelink/_sysml/`; rebuild it with `tool/regen_grammar.sh`. The C/C++
+source import grammars are compiled on first use with `cc`; Kaitai generation
+does not use them.
