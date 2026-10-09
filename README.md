@@ -76,7 +76,13 @@ Run the tool to validate links or generate the item's body:
 ```sh
 typelink check model.sysml
 typelink expand model.sysml
+typelink update
 ```
+
+`typelink update` clones the latest `main` branch with its grammar submodules
+and reinstalls the CLI. Its source checkout is retained under the user cache
+(`$XDG_CACHE_HOME/typelink/checkouts` or `~/.cache/typelink/checkouts`) so the
+editable installation remains usable after the temporary download is removed.
 
 Expansion writes generated content between `typelink:begin` and `typelink:end`
 markers; re-running it replaces that region. Pass a directory to `check` or

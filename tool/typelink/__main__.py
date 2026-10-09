@@ -3,7 +3,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import emit, fetch, kaitai, parser, spec, sysml
+from . import emit, fetch, kaitai, parser, spec, sysml, update
 from .model import ImportError_
 
 
@@ -54,12 +54,17 @@ def main(argv=None):
                    default="unsigned",
                    help="default for Integer fields without metadata (default: %(default)s)")
     sub.add_parser("sync-spec", help="embed spec files into spec/RFC.md")
+    sub.add_parser("update", help="install the latest version from the main branch")
     args = ap.parse_args(argv)
 
     if args.cmd == "sync-spec":
         spec.sync_rfc()
         return 0
     try:
+        if args.cmd == "update":
+            revision = update.install_latest()
+            print(f"Updated typelink from {update.BRANCH} ({revision[:12]}).")
+            return 0
         if args.cmd == "expand":
             directory = Path(args.file).is_dir()
             if directory and args.output:
@@ -139,6 +144,7 @@ def main(argv=None):
         print(json.dumps(found, indent=2))
         return status
     except (parser.TypeLinkError, sysml.SysMLSyntaxError, kaitai.KaitaiError,
+            update.UpdateError,
             ImportError_, ValueError, OSError) as ex:
         print(f"error: {ex}", file=sys.stderr)
         return 1
