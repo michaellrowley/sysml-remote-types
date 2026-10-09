@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from typelink import emit, fetch, kaitai, languages, parser, repository, spec, sysml  # noqa: E402
+from typelink import (
+    emit, fetch, kaitai, languages, parser, repository, spec, sysml, update,
+)  # noqa: E402
 from typelink.__main__ import main  # noqa: E402
 
 KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
@@ -753,6 +755,60 @@ class RepositoryTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_update_command_installs_latest_and_reports_revision(self):
+        output = StringIO()
+        revision = "a" * 40
+        with patch("typelink.update.install_latest", return_value=revision):
+            with redirect_stdout(output):
+                self.assertEqual(main(["update"]), 0)
+        self.assertEqual(output.getvalue(), f"Updated typelink from main ({revision[:12]}).\n")
+
+    def test_update_command_reports_install_failure(self):
+        error = StringIO()
+        with patch("typelink.update.install_latest",
+                   side_effect=update.UpdateError("pip failed")):
+            with redirect_stderr(error):
+                self.assertEqual(main(["update"]), 1)
+        self.assertIn("error: pip failed", error.getvalue())
+
+    def test_update_clones_main_and_installs_from_persistent_checkout(self):
+        revision = "a" * 40
+        with tempfile.TemporaryDirectory() as cache:
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append(command)
+                if command[0] == "git" and command[1] == "clone":
+                    checkout = Path(command[-1])
+                    (checkout / "tool").mkdir(parents=True)
+                    (checkout / "tool" / "pyproject.toml").touch()
+                    return None
+                if command[:2] == ["git", "-C"]:
+                    return subprocess.CompletedProcess(command, 0, revision + "\n")
+                self.assertEqual(command[-1], str(Path(cache) / "typelink" / "checkouts"
+                                                  / revision / "tool"))
+                self.assertTrue((Path(command[-1]) / "pyproject.toml").exists())
+                return None
+
+            with patch.dict("os.environ", {"XDG_CACHE_HOME": cache}), patch(
+                    "typelink.update.subprocess.run", side_effect=run):
+                self.assertEqual(update.install_latest(), revision)
+
+            clone = commands[0]
+            self.assertEqual(clone[1:7], [
+                "clone", "--depth", "1", "--branch", "main", "--single-branch"])
+            self.assertIn("--recurse-submodules", clone)
+            self.assertEqual(
+                commands[-1][3:6], ["install", "--force-reinstall", "--editable"])
+
+    def test_update_reports_git_failure_without_installing(self):
+        error = subprocess.CalledProcessError(128, ["git", "clone"])
+        with tempfile.TemporaryDirectory() as cache, patch.dict(
+                "os.environ", {"XDG_CACHE_HOME": cache}), patch(
+                    "typelink.update.subprocess.run", side_effect=error):
+            with self.assertRaises(update.UpdateError):
+                update.install_latest()
+
     def test_expand_clone_option_is_opt_in(self):
         with tempfile.NamedTemporaryFile("w") as model:
             model.write(LINK % (
