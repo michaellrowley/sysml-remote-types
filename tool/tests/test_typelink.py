@@ -636,6 +636,64 @@ class CliTests(unittest.TestCase):
                 main(["kaitai", source.name, "--data-model", "lp64"])
         self.assertEqual(result.exception.code, 2)
 
+    def test_kaitai_recurses_into_directory_and_writes_schemas_next_to_sources(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "nested"
+            nested.mkdir()
+            model = root / "packet.sysml"
+            nested_model = nested / "child.sysml"
+            model.write_text("packet model")
+            nested_model.write_text("child model")
+            (nested / "ignored.txt").write_text("not SysML")
+
+            with patch("typelink.__main__.kaitai.generate",
+                       side_effect=lambda text, **kwargs: "schema: " + text):
+                self.assertEqual(main(["kaitai", str(root), "--expanded"]), 0)
+
+            self.assertEqual(model.with_suffix(".ksy").read_text(), "schema: packet model")
+            self.assertEqual(nested_model.with_suffix(".ksy").read_text(), "schema: child model")
+            self.assertTrue((nested / "ignored.txt").exists())
+
+    def test_kaitai_directory_output_mirrors_source_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "nested"
+            nested.mkdir()
+            model = nested / "packet.sysml"
+            model.write_text("packet model")
+            output_dir = root / "schemas"
+
+            with patch("typelink.__main__.kaitai.generate", return_value="schema"):
+                self.assertEqual(main([
+                    "kaitai", str(root), "--expanded", "-o", str(output_dir)]), 0)
+
+            self.assertEqual(
+                (output_dir / "nested" / "packet.ksy").read_text(), "schema")
+            self.assertEqual(model.read_text(), "packet model")
+
+    def test_kaitai_directory_reports_errors_and_continues(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            broken = root / "a-broken.sysml"
+            valid = root / "b-valid.sysml"
+            broken.write_text("broken")
+            valid.write_text("valid")
+            error = StringIO()
+
+            def generate(text, **kwargs):
+                if text == "broken":
+                    raise kaitai.KaitaiError("invalid model")
+                return "schema"
+
+            with patch("typelink.__main__.kaitai.generate", side_effect=generate):
+                with redirect_stderr(error):
+                    self.assertEqual(main(["kaitai", str(root), "--expanded"]), 1)
+
+            self.assertFalse(broken.with_suffix(".ksy").exists())
+            self.assertEqual(valid.with_suffix(".ksy").read_text(), "schema")
+            self.assertIn(f"{broken}: invalid model", error.getvalue())
+
     def test_check_recurses_into_sysml_files_in_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

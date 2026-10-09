@@ -33,10 +33,12 @@ def main(argv=None):
                    help="refuse linked resources larger than this (default: %(default)s)")
     e.add_argument("--clone-repo", action="store_true",
                    help="clone GitHub repositories temporarily to resolve types across files")
-    k = sub.add_parser("kaitai", help="generate Kaitai Struct YAML from a SysMLv2 item")
-    k.add_argument("file")
+    k = sub.add_parser(
+        "kaitai", help="generate Kaitai Struct YAML from SysML files or directories")
+    k.add_argument("file", help="SysML file or directory of SysML files")
     k.add_argument("--item", help="item definition to use as the Kaitai root")
-    k.add_argument("-o", "--output", help="write here instead of stdout")
+    k.add_argument("-o", "--output",
+                   help="write here instead of stdout (directory targets use an output directory)")
     k.add_argument("--expanded", action="store_true",
                    help="skip @TypeLink resolution for imported SysMLv2 input")
     k.add_argument("--max-bytes", type=int, default=fetch.DEFAULT_MAX_BYTES,
@@ -88,23 +90,43 @@ def main(argv=None):
                     status = 1
             return status
         if args.cmd == "kaitai":
-            with open(args.file) as fh:
-                text = fh.read()
-            if not args.expanded:
-                text = emit.expand(
-                    text, max_bytes=args.max_bytes,
-                    clone_repo=args.clone_repo,
-                    warn=lambda m: print("warning:", m, file=sys.stderr))
-            out = kaitai.generate(
-                text, item=args.item, endian=args.endian,
-                bit_endian=args.bit_endian,
-                integer_signedness=args.integer_signedness)
-            if args.output:
-                with open(args.output, "w") as fh:
-                    fh.write(out)
-            else:
-                sys.stdout.write(out)
-            return 0
+            directory = Path(args.file).is_dir()
+            output_dir = Path(args.output) if directory and args.output else None
+            if output_dir and output_dir.exists() and not output_dir.is_dir():
+                raise ValueError("--output must be a directory for a directory target")
+            status = 0
+            for file in _targets(args.file):
+                try:
+                    with open(file) as fh:
+                        text = fh.read()
+                    if not args.expanded:
+                        text = emit.expand(
+                            text, max_bytes=args.max_bytes,
+                            clone_repo=args.clone_repo,
+                            warn=lambda m: print("warning:", m, file=sys.stderr))
+                    out = kaitai.generate(
+                        text, item=args.item, endian=args.endian,
+                        bit_endian=args.bit_endian,
+                        integer_signedness=args.integer_signedness)
+                    if output_dir:
+                        relative = Path(file).relative_to(Path(args.file))
+                        output = (output_dir / relative).with_suffix(".ksy")
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        output.write_text(out)
+                    elif directory:
+                        Path(file).with_suffix(".ksy").write_text(out)
+                    elif args.output:
+                        with open(args.output, "w") as fh:
+                            fh.write(out)
+                    else:
+                        sys.stdout.write(out)
+                except (parser.TypeLinkError, sysml.SysMLSyntaxError,
+                        kaitai.KaitaiError, ImportError_, ValueError, OSError) as ex:
+                    if not directory:
+                        raise
+                    print(f"{file}: {ex}", file=sys.stderr)
+                    status = 1
+            return status
         status, found = 0, []
         for f in (file for path in args.files for file in _targets(path)):
             try:
