@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from typelink import emit, fetch, kaitai, languages, parser, repository, spec, sysml  # noqa: E402
 from typelink.__main__ import main  # noqa: E402
 
+KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
+
 LINK = '''item def %s {
     @TypeLink {
         origin = TypeOrigin::%s;
@@ -261,7 +263,7 @@ class KaitaiTests(unittest.TestCase):
             "  - id: payload\n    type: u1\n    repeat: expr\n    repeat-expr: 4",
             schema)
 
-    @unittest.skipUnless(shutil.which("ksc"),
+    @unittest.skipUnless(KAITAI_COMPILER,
                          "Kaitai Struct compiler (ksc) is not installed")
     def test_cpp_round_trip_kaitai_schema_compiles(self):
         _, schema = self.cpp_round_trip()
@@ -270,7 +272,7 @@ class KaitaiTests(unittest.TestCase):
             schema_path = Path(temp) / "packet.ksy"
             schema_path.write_text(schema)
             result = subprocess.run(
-                ["ksc", "-t", "python", "--outdir", temp, str(schema_path)],
+                [KAITAI_COMPILER, "-t", "python", "--outdir", temp, str(schema_path)],
                 capture_output=True, text=True)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
