@@ -79,8 +79,11 @@ typelink expand model.sysml
 ```
 
 Expansion writes generated content between `typelink:begin` and `typelink:end`
-markers; re-running it replaces that region. See the [RFC](spec/RFC.md) for
-the metadata definition, sizing rules, and supported formats.
+markers; re-running it replaces that region. Pass a directory to `check` or
+`expand` to process its `.sysml` files recursively. `check` combines findings
+into its normal JSON output; `expand` rewrites those files in place. See the
+[RFC](spec/RFC.md) for the metadata definition, sizing rules, and supported
+formats.
 
 ## Generate Kaitai Struct schemas
 
