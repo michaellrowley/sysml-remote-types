@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,6 +35,17 @@ struct bad { uint8_t pre; unknown_t u; };
 PROTO_SRC = '''syntax = "proto3";
 message Inner { fixed32 id = 1; }
 message Msg { int32 a = 1; repeated string tags = 2; Inner in = 3; }
+'''
+CPP_ROUND_TRIP_SRC = '''
+struct Header {
+    unsigned char kind;
+    unsigned short length;
+};
+struct Packet {
+    Header header;
+    unsigned int sequence;
+    unsigned char payload[4];
+};
 '''
 
 
@@ -231,6 +243,38 @@ message Packet {
 
 
 class KaitaiTests(unittest.TestCase):
+    def cpp_round_trip(self):
+        expanded = expand_with("CPP", "Packet", CPP_ROUND_TRIP_SRC)
+        sysml.parse(expanded)
+        return expanded, kaitai.generate(expanded, item="Packet")
+
+    def test_cpp_source_round_trips_through_sysml_to_kaitai(self):
+        expanded, schema = self.cpp_round_trip()
+
+        self.assertIn("item def Header", expanded)
+        self.assertIn("item header : Header", expanded)
+        self.assertIn("@DataOffset { bits = 32; }", expanded)
+        self.assertIn("  id: packet", schema)
+        self.assertIn("  - id: header\n    type: packet__header", schema)
+        self.assertIn("  - id: sequence\n    type: u4", schema)
+        self.assertIn(
+            "  - id: payload\n    type: u1\n    repeat: expr\n    repeat-expr: 4",
+            schema)
+
+    @unittest.skipUnless(shutil.which("ksc"),
+                         "Kaitai Struct compiler (ksc) is not installed")
+    def test_cpp_round_trip_kaitai_schema_compiles(self):
+        _, schema = self.cpp_round_trip()
+
+        with tempfile.TemporaryDirectory() as temp:
+            schema_path = Path(temp) / "packet.ksy"
+            schema_path.write_text(schema)
+            result = subprocess.run(
+                ["ksc", "-t", "python", "--outdir", temp, str(schema_path)],
+                capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_checked_in_example_matches_generated_schema(self):
         root = Path(__file__).resolve().parents[2]
         model = (root / "examples" / "packet.sysml").read_text()
