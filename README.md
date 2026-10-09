@@ -99,6 +99,10 @@ contains more than one top-level item:
 typelink kaitai examples/packet.sysml --item Packet -o packet.ksy
 ```
 
+Pass a directory to generate a `.ksy` file for each `.sysml` file recursively.
+Schemas are written beside their source files by default; `-o` can instead
+name an output directory, where the source directory structure is mirrored.
+
 The checked-in [SysML input](examples/packet.sysml) and
 [generated schema](examples/packet.ksy) show the native packed layout. To
 generate from a model that was expanded separately, pass `--expanded`:

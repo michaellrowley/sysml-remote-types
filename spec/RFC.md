@@ -243,6 +243,11 @@ typelink expand model.sysml -o expanded.sysml
 typelink kaitai expanded.sysml --item packet --expanded -o packet.ksy
 ```
 
+The input may also be a directory. In that case, `.sysml` files are processed
+recursively, with one `.ksy` output per source file. Outputs are written beside
+each source by default; when `-o` is supplied, it names an output directory
+and the source directory structure is mirrored there.
+
 The command also accepts `--clone-repo` and `--max-bytes` for the optional
 expansion step. `--endian le|be` sets byte order for fixed-width fields whose
 encoding does not specify one (default `le`); `--bit-endian le|be` sets KSY
