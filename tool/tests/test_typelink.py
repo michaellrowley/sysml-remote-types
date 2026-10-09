@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from typelink import emit, fetch, kaitai, languages, parser, repository, spec, sysml  # noqa: E402
 from typelink.__main__ import main  # noqa: E402
+
+KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
 
 LINK = '''item def %s {
     @TypeLink {
@@ -35,6 +38,128 @@ PROTO_SRC = '''syntax = "proto3";
 message Inner { fixed32 id = 1; }
 message Msg { int32 a = 1; repeated string tags = 2; Inner in = 3; }
 '''
+CPP_ROUND_TRIP_SRC = '''
+struct Header {
+    unsigned char kind;
+    unsigned short length;
+};
+struct Packet {
+    Header header;
+    unsigned int sequence;
+    unsigned char payload[4];
+};
+'''
+CPP_KAITAI_ROUND_TRIPS = (
+    (
+        "nested structs, padding, and fixed arrays",
+        CPP_ROUND_TRIP_SRC,
+        None,
+        {},
+        (
+            "  - id: header\n    type: packet__header",
+            "  - id: sequence\n    type: u4",
+            "repeat-expr: 4",
+        ),
+    ),
+    (
+        "scalar widths and aliases",
+        '''typedef unsigned short Word;
+enum State { Off, On };
+struct Packet {
+    signed char delta;
+    unsigned char flags;
+    Word length;
+    State state;
+    long long signed_wide;
+    unsigned long long unsigned_wide;
+    float ratio;
+    double measure;
+    bool ready;
+};''',
+        None,
+        {},
+        ("type: s1", "type: u1", "type: u2", "type: s4", "type: s8",
+         "type: u8", "type: f4", "type: f8", "  - id: ready\n    type: u1"),
+    ),
+    (
+        "signed bitfields",
+        '''struct Packet {
+    unsigned char prefix;
+    signed int delta : 3;
+    unsigned int mode : 5;
+};''',
+        None,
+        {},
+        ("type: b3", "type: b5", 'value: "delta >= 4 ? delta - 8 : delta"'),
+    ),
+    (
+        "opaque union storage",
+        '''union Payload {
+    unsigned int number;
+    unsigned char bytes[4];
+};
+struct Packet {
+    unsigned char tag;
+    Payload payload;
+};''',
+        None,
+        {},
+        ("type: packet__payload", "- id: data\n        size: 4"),
+    ),
+    (
+        "pointer size under ILP32",
+        '''struct Packet {
+    unsigned char tag;
+    void *address;
+};''',
+        "ilp32",
+        {},
+        ("  - id: address\n    type: u4",),
+    ),
+    (
+        "multidimensional arrays",
+        '''struct Packet {
+    unsigned short grid[2][3];
+};''',
+        None,
+        {},
+        ("  - id: grid\n    type: u2", "repeat-expr: 6"),
+    ),
+    (
+        "configured byte and bit endianness",
+        '''struct Packet {
+    unsigned int first : 3;
+    unsigned int second : 5;
+};''',
+        None,
+        {"endian": "be", "bit_endian": "be"},
+        ("  endian: be", "  bit-endian: be"),
+    ),
+    (
+        "default signedness for plain char",
+        "struct Packet { char value; };",
+        None,
+        {},
+        ("  - id: value\n    type: u1",),
+    ),
+    (
+        "signedness override for plain char",
+        "struct Packet { char value; };",
+        None,
+        {"integer_signedness": "signed"},
+        ("  - id: value\n    type: s1",),
+    ),
+    (
+        "C++ class layout",
+        '''class Packet {
+public:
+    unsigned short value;
+};''',
+        None,
+        {},
+        ("  - id: value\n    type: u2",),
+    ),
+)
 
 
 def expand_with(origin, element, source, **kw):
@@ -231,6 +356,50 @@ message Packet {
 
 
 class KaitaiTests(unittest.TestCase):
+    def cpp_round_trip(self, source=CPP_ROUND_TRIP_SRC, data_model=None, **options):
+        expanded = expand_with("CPP", "Packet", source, data_model=data_model)
+        sysml.parse(expanded)
+        return expanded, kaitai.generate(expanded, item="Packet", **options)
+
+    def test_cpp_source_round_trips_through_sysml_to_kaitai(self):
+        expanded, schema = self.cpp_round_trip()
+
+        self.assertIn("item def Header", expanded)
+        self.assertIn("item header : Header", expanded)
+        self.assertIn("@DataOffset { bits = 32; }", expanded)
+        self.assertIn("  id: packet", schema)
+        self.assertIn("  - id: header\n    type: packet__header", schema)
+        self.assertIn("  - id: sequence\n    type: u4", schema)
+        self.assertIn(
+            "  - id: payload\n    type: u1\n    repeat: expr\n    repeat-expr: 4",
+            schema)
+
+    @unittest.skipUnless(KAITAI_COMPILER,
+                         "Kaitai Struct compiler (ksc) is not installed")
+    def test_cpp_round_trip_kaitai_schema_compiles(self):
+        for name, source, data_model, options, _ in CPP_KAITAI_ROUND_TRIPS:
+            with self.subTest(feature=name):
+                _, schema = self.cpp_round_trip(source, data_model, **options)
+
+                with tempfile.TemporaryDirectory() as temp:
+                    schema_path = Path(temp) / "packet.ksy"
+                    schema_path.write_text(schema)
+                    result = subprocess.run(
+                        [KAITAI_COMPILER, "-t", "python", "--outdir", temp,
+                         str(schema_path)],
+                        capture_output=True, text=True)
+
+                self.assertEqual(
+                    result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cpp_round_trips_cover_kaitai_features(self):
+        for name, source, data_model, options, expected in CPP_KAITAI_ROUND_TRIPS:
+            with self.subTest(feature=name):
+                _, schema = self.cpp_round_trip(source, data_model, **options)
+
+                for snippet in expected:
+                    self.assertIn(snippet, schema)
+
     def test_checked_in_example_matches_generated_schema(self):
         root = Path(__file__).resolve().parents[2]
         model = (root / "examples" / "packet.sysml").read_text()
