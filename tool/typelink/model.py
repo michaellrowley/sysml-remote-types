@@ -5,6 +5,7 @@ from typing import List, Optional
 
 @dataclass
 class Member:
+    """One field in a source type, with optional layout and wire metadata."""
     name: str
     kind: str                      # integer | real | boolean | string | struct | unresolved
     bits: Optional[int] = None     # size of ONE instance, None when variable/unknown
@@ -18,6 +19,7 @@ class Member:
 
 @dataclass
 class WireField:
+    """Protocol-level field details retained for wire-format generators."""
     number: int
     kind: str
     source_type: str
@@ -30,6 +32,7 @@ class WireField:
 
 @dataclass
 class Struct:
+    """Named aggregate plus its members and any referenced nested types."""
     name: str
     members: List[Member] = field(default_factory=list)
     bits: Optional[int] = None
@@ -39,13 +42,17 @@ class Struct:
 
 @dataclass
 class Result:
+    """Importer result: the normalized type plus non-fatal limitations."""
     struct: Struct
     warnings: List[str] = field(default_factory=list)
 
 
 class ImportError_(ValueError):
+    """A source importer cannot resolve or represent the requested type."""
+
     pass
 
 
 def align_up(value, align):
+    """Round a bit offset up to the next alignment boundary."""
     return -(-value // align) * align

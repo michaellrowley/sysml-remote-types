@@ -24,6 +24,7 @@ def language(repo, symbol):
     suffix = ".dll" if sys.platform == "win32" else ".dylib" if sys.platform == "darwin" else ".so"
     lib = BUILD_DIR / f"{repo}{suffix}"
     sources = sorted(src.glob("*.c"))
+    # Reuse the compiled grammar until one of its source files changes.
     if not lib.exists() or lib.stat().st_mtime < max(s.stat().st_mtime for s in sources):
         BUILD_DIR.mkdir(exist_ok=True)
         cc = sysconfig.get_config_var("CC") or "cc"
@@ -45,4 +46,5 @@ def get_language(repo, symbol):
 
 
 def parser_for(repo, symbol):
+    """Return a parser configured with one of the pinned source grammars."""
     return Parser(get_language(repo, symbol))

@@ -18,6 +18,8 @@ class Link:
 
 
 class TypeLinkError(ValueError):
+    """A TypeLink annotation is malformed or violates the normative spec."""
+
     pass
 
 
@@ -38,6 +40,7 @@ def _value(feature):
 
 
 def extract(tree, spec=None):
+    """Extract TypeLink metadata and validate it against the normative spec."""
     spec = spec or specmod.load()
     attrs = spec.link_attrs
     links = []

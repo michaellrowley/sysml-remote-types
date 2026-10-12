@@ -30,6 +30,7 @@ def _size(bits, ind):
 
 
 def render_members(struct, types, ind, emitted):
+    """Render nested type definitions once, then the owning item's members."""
     out = []
     for sub in struct.nested:
         if sub.name in emitted:
@@ -83,6 +84,7 @@ def render_members(struct, types, ind, emitted):
 
 
 def render_region(struct, types, ind):
+    """Render the marker-delimited block that expansion owns and can replace."""
     lines = [ind + BEGIN]
     if struct.layout_kind:
         layout = {"struct": "Struct", "union": "Union",
@@ -98,6 +100,7 @@ def render_region(struct, types, ind):
 
 def load_layout(link, data_model=None, text=None, max_bytes=fetch.DEFAULT_MAX_BYTES,
                 additional_sources=()):
+    """Resolve one link through its registered importer, fetching only if needed."""
     source = text if text is not None else fetch.fetch(link.uri, max_bytes)
     return languages.get(link.origin).import_type(
         source, link.element, data_model, additional_sources)
@@ -134,6 +137,7 @@ def expand(text, data_model=None, fetcher=None, warn=lambda m: None,
         edits[body.start.start] = (body.stop.stop, "{" + inner + render_region(res.struct, types, ind) + "\n"
                                    + ind[:-4 if len(ind) >= 4 else 0] + "}")
     for start in sorted(edits, reverse=True):
+        # Apply source edits from right to left so earlier parser offsets stay valid.
         stop, repl = edits[start]
         text = text[:start] + repl + text[stop + 1:]
     sysml.parse(text)   # the output must itself be valid SysMLv2

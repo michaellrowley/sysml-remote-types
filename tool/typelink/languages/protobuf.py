@@ -19,6 +19,7 @@ _WIRE_TYPES = {
 
 
 def _import_proto(source, element, additional_sources=()):
+    """Index all supplied schemas, then convert the selected message to the common model."""
     scalars = specmod.load_types()["protobuf_scalars"]
     files = [Parser().parse(text) for text in (source, *additional_sources)]
     messages, message_syntax, enums = {}, {}, set()
@@ -33,6 +34,7 @@ def _import_proto(source, element, additional_sources=()):
                 enums.add(e.name)
 
     for f in files:
+        # Peer files resolve cross-file message/enum references in the same pass.
         collect(f.file_elements, f.syntax)
     if element not in messages:
         raise ImportError_(f"no message named '{element}' found")
@@ -46,6 +48,8 @@ def _import_proto(source, element, additional_sources=()):
                 warnings.append(f"group '{e.name}' is not supported")
                 yield e, e.cardinality
             elif isinstance(e, ast.OneOf):
+                # oneof alternatives are optional even though the parser does not
+                # expose them as ordinary optional Field nodes.
                 for o in e.elements:
                     if isinstance(o, ast.Field):
                         yield o, FieldCardinality.OPTIONAL
@@ -95,6 +99,7 @@ def _import_proto(source, element, additional_sources=()):
         if name in cache:
             return cache[name]
         st = Struct(name, layout_kind="protobuf")
+        # Cache before walking fields so recursive message types terminate.
         cache[name] = st            # total size stays None: wire size is variable
         for fld, card in fields(messages[name].elements):
             wire = wire_field(fld, card, name)

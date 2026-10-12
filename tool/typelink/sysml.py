@@ -44,6 +44,7 @@ def walk(ctx):
         if isinstance(n, TerminalNode):
             continue
         yield n
+        # Reverse the stack push order so traversal follows the source child order.
         stack.extend(reversed(list(n.getChildren())))
 
 

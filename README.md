@@ -91,6 +91,56 @@ into its normal JSON output; `expand` rewrites those files in place. See the
 [RFC](spec/RFC.md) for the metadata definition, sizing rules, and supported
 formats.
 
+## Modular architecture
+
+The CLI discovers command packages independently from the processing pipeline.
+Expansion uses a language registry to normalize external source types before
+the SysML emitter or Kaitai generator consumes them:
+
+```mermaid
+flowchart LR
+    CLI["typelink CLI"] --> MAIN["__main__.py"]
+    MAIN --> DISCOVER["Discover commands/* packages"]
+    DISCOVER --> CHECK["check"]
+    DISCOVER --> EXPAND["expand"]
+    DISCOVER --> KAITAI["kaitai"]
+    DISCOVER --> SYNC["sync-spec"]
+    DISCOVER --> UPDATE["update"]
+
+    CHECK --> CHECK_PARSE["TypeLink parser"]
+    CHECK_PARSE --> JSON["JSON results"]
+
+    EXPAND --> RESOLVE["emit.expand"]
+    KAITAI -->|default: resolve links| RESOLVE
+    RESOLVE --> PARSER["Parse SysML and extract TypeLinks"]
+    PARSER --> FETCH["Fetch linked source<br/>optional repository peers"]
+    FETCH --> REGISTRY["Language registry<br/>TypeOrigin"]
+    REGISTRY --> C["C / C++ importer"]
+    REGISTRY --> PROTO["Protobuf importer"]
+    C --> MODEL["Language-neutral model"]
+    PROTO --> MODEL
+    MODEL --> EMIT["SysML emitter"]
+    EMIT --> EXPANDED["Expanded SysML"]
+
+    KAITAI -->|--expanded: skip link resolution| GENERATOR["Kaitai generator"]
+    EXPANDED --> GENERATOR
+    GENERATOR --> KSY["Kaitai .ksy"]
+
+    SYNC --> SPEC["Canonical spec files"]
+    SPEC --> RFC["Embedded RFC spec"]
+    UPDATE --> INSTALL["Clone and install latest revision"]
+```
+
+Type importers are similarly isolated under `tool/typelink/languages/`. Each
+importer returns the language-neutral model defined in `model.py`; the registry
+maps it to a `TypeOrigin` value from `spec/typelink.sysml`. Add the matching
+enum literal to `TypeOrigin` and run `typelink sync-spec`, then add an importer
+module with `@register("Origin")`, implement `Importer.import_type`, and import
+that module from `languages/__init__.py`. Add scalar-width metadata to
+`spec/types.json` when the language needs it. Kaitai generation consumes the
+normalized SysML model, keeping source-language parsing separate from
+output-format generation.
+
 ## Generate Kaitai Struct schemas
 
 `typelink kaitai` generates a Kaitai Struct `.ksy` schema from an imported
@@ -156,3 +206,13 @@ without `--recurse-submodules`, initialize them with
 `tool/typelink/_sysml/`; rebuild it with `tool/regen_grammar.sh`. The C/C++
 source import grammars are compiled on first use with `cc`; Kaitai generation
 does not use them.
+
+## Extending the CLI
+
+CLI commands are discovered from packages under `tool/typelink/commands/`.
+To add one, create a directory such as `commands/my_command/` with an
+`__init__.py` that defines `register(subparsers)`. Add its parser there and set
+`command_handler` to the package's handler function. The command is then
+available as `typelink my-command` without editing the CLI dispatcher or a
+central command list. Use a hyphenated parser name when the package name uses
+underscores, as with `sync_spec` / `sync-spec`.
