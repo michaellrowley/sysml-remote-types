@@ -167,6 +167,46 @@ available as `typelink my-command` without editing the CLI dispatcher or a
 central command list. Use a hyphenated parser name when the package name uses
 underscores, as with `sync_spec` / `sync-spec`.
 
+## Modular architecture
+
+The CLI discovers command packages independently from the processing pipeline.
+Expansion uses a language registry to normalize external source types before
+the SysML emitter or Kaitai generator consumes them:
+
+```mermaid
+flowchart LR
+    CLI["typelink CLI"] --> MAIN["__main__.py"]
+    MAIN --> DISCOVER["Discover commands/* packages"]
+    DISCOVER --> CHECK["check"]
+    DISCOVER --> EXPAND["expand"]
+    DISCOVER --> KAITAI["kaitai"]
+    DISCOVER --> SYNC["sync-spec"]
+    DISCOVER --> UPDATE["update"]
+
+    CHECK --> CHECK_PARSE["TypeLink parser"]
+    CHECK_PARSE --> JSON["JSON results"]
+
+    EXPAND --> RESOLVE["emit.expand"]
+    KAITAI -->|default: resolve links| RESOLVE
+    RESOLVE --> PARSER["Parse SysML and extract TypeLinks"]
+    PARSER --> FETCH["Fetch linked source<br/>optional repository peers"]
+    FETCH --> REGISTRY["Language registry<br/>TypeOrigin"]
+    REGISTRY --> C["C / C++ importer"]
+    REGISTRY --> PROTO["Protobuf importer"]
+    C --> MODEL["Language-neutral model"]
+    PROTO --> MODEL
+    MODEL --> EMIT["SysML emitter"]
+    EMIT --> EXPANDED["Expanded SysML"]
+
+    KAITAI -->|--expanded: skip link resolution| GENERATOR["Kaitai generator"]
+    EXPANDED --> GENERATOR
+    GENERATOR --> KSY["Kaitai .ksy"]
+
+    SYNC --> SPEC["Canonical spec files"]
+    SPEC --> RFC["Embedded RFC spec"]
+    UPDATE --> INSTALL["Clone and install latest revision"]
+```
+
 Type importers are similarly isolated under `tool/typelink/languages/`. Each
 importer returns the language-neutral model defined in `model.py`; the registry
 maps it to a `TypeOrigin` value from `spec/typelink.sysml`. Add the matching
