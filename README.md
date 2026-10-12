@@ -156,3 +156,13 @@ without `--recurse-submodules`, initialize them with
 `tool/typelink/_sysml/`; rebuild it with `tool/regen_grammar.sh`. The C/C++
 source import grammars are compiled on first use with `cc`; Kaitai generation
 does not use them.
+
+## Extending the CLI
+
+CLI commands are discovered from packages under `tool/typelink/commands/`.
+To add one, create a directory such as `commands/my_command/` with an
+`__init__.py` that defines `register(subparsers)`. Add its parser there and set
+`command_handler` to the package's handler function. The command is then
+available as `typelink my-command` without editing the CLI dispatcher or a
+central command list. Use a hyphenated parser name when the package name uses
+underscores, as with `sync_spec` / `sync-spec`.

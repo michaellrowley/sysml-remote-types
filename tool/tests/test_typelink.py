@@ -1,3 +1,4 @@
+import argparse
 import json
 import shutil
 import subprocess
@@ -12,9 +13,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from typelink import (
-    emit, fetch, kaitai, languages, parser, repository, spec, sysml, update,
+    commands as cli_commands, emit, fetch, kaitai, languages, parser, repository,
+    spec, sysml, update,
 )  # noqa: E402
-from typelink.__main__ import main  # noqa: E402
+from typelink.__main__ import build_parser, main  # noqa: E402
 
 KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
 
@@ -755,6 +757,32 @@ class RepositoryTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_command_packages_are_discovered_and_registered(self):
+        parser = build_parser()
+        subparsers = next(
+            action for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction))
+        self.assertEqual(
+            set(subparsers.choices),
+            {"check", "expand", "kaitai", "sync-spec", "update"})
+
+    def test_new_command_package_needs_no_dispatcher_change(self):
+        module_name = f"{cli_commands.__name__}.future_command"
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp) / "future_command"
+            package.mkdir()
+            (package / "__init__.py").write_text(
+                "def register(subparsers):\n"
+                "    command = subparsers.add_parser('future-command')\n"
+                "    command.set_defaults(command_handler=lambda args: 7)\n")
+            try:
+                with patch.object(cli_commands, "__path__", [temp]):
+                    parser = build_parser()
+                args = parser.parse_args(["future-command"])
+                self.assertEqual(args.command_handler(args), 7)
+            finally:
+                sys.modules.pop(module_name, None)
+
     def test_update_command_installs_latest_and_reports_revision(self):
         output = StringIO()
         revision = "a" * 40
@@ -762,6 +790,11 @@ class CliTests(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(main(["update"]), 0)
         self.assertEqual(output.getvalue(), f"Updated typelink from main ({revision[:12]}).\n")
+
+    def test_sync_spec_command_runs_spec_sync(self):
+        with patch("typelink.commands.sync_spec.spec.sync_rfc") as sync:
+            self.assertEqual(main(["sync-spec"]), 0)
+        sync.assert_called_once_with()
 
     def test_update_command_reports_install_failure(self):
         error = StringIO()
@@ -818,7 +851,8 @@ class CliTests(unittest.TestCase):
             for args, expected in (([], False), (["--clone-repo"], True)):
                 output = StringIO()
                 with self.subTest(args=args), patch(
-                        "typelink.__main__.emit.expand", return_value="expanded") as expand:
+                        "typelink.commands.expand.emit.expand",
+                        return_value="expanded") as expand:
                     with redirect_stdout(output):
                         self.assertEqual(main(["expand", model.name, *args]), 0)
                     self.assertEqual(output.getvalue(), "expanded")
@@ -834,8 +868,10 @@ class CliTests(unittest.TestCase):
             for args, should_expand in (([], True), (["--expanded"], False)):
                 output = StringIO()
                 with self.subTest(args=args), patch(
-                        "typelink.__main__.emit.expand", return_value=model) as expand, patch(
-                            "typelink.__main__.kaitai.generate", return_value="schema") as generate:
+                        "typelink.commands.kaitai.emit.expand",
+                        return_value=model) as expand, patch(
+                            "typelink.commands.kaitai.kaitai.generate",
+                            return_value="schema") as generate:
                     with redirect_stdout(output):
                         self.assertEqual(
                             main(["kaitai", source.name, "--item", "Packet", *args]), 0)
@@ -845,8 +881,8 @@ class CliTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 output_path = Path(directory) / "packet.ksy"
                 with patch(
-                        "typelink.__main__.emit.expand") as expand, patch(
-                            "typelink.__main__.kaitai.generate",
+                        "typelink.commands.kaitai.emit.expand") as expand, patch(
+                            "typelink.commands.kaitai.kaitai.generate",
                             return_value="file schema") as generate:
                     self.assertEqual(main([
                         "kaitai", source.name, "--item", "Packet", "--expanded",
@@ -872,7 +908,7 @@ class CliTests(unittest.TestCase):
             nested_model.write_text("child model")
             (nested / "ignored.txt").write_text("not SysML")
 
-            with patch("typelink.__main__.kaitai.generate",
+            with patch("typelink.commands.kaitai.kaitai.generate",
                        side_effect=lambda text, **kwargs: "schema: " + text):
                 self.assertEqual(main(["kaitai", str(root), "--expanded"]), 0)
 
@@ -889,7 +925,7 @@ class CliTests(unittest.TestCase):
             model.write_text("packet model")
             output_dir = root / "schemas"
 
-            with patch("typelink.__main__.kaitai.generate", return_value="schema"):
+            with patch("typelink.commands.kaitai.kaitai.generate", return_value="schema"):
                 self.assertEqual(main([
                     "kaitai", str(root), "--expanded", "-o", str(output_dir)]), 0)
 
@@ -911,7 +947,7 @@ class CliTests(unittest.TestCase):
                     raise kaitai.KaitaiError("invalid model")
                 return "schema"
 
-            with patch("typelink.__main__.kaitai.generate", side_effect=generate):
+            with patch("typelink.commands.kaitai.kaitai.generate", side_effect=generate):
                 with redirect_stderr(error):
                     self.assertEqual(main(["kaitai", str(root), "--expanded"]), 1)
 
@@ -953,7 +989,7 @@ class CliTests(unittest.TestCase):
             (nested / "ignored.txt").write_text("untouched")
             output = StringIO()
 
-            with patch("typelink.__main__.emit.expand",
+            with patch("typelink.commands.expand.emit.expand",
                        side_effect=lambda text, *args, **kwargs: "expanded " + text):
                 with redirect_stdout(output):
                     self.assertEqual(main(["expand", str(root)]), 0)
@@ -984,7 +1020,7 @@ class CliTests(unittest.TestCase):
                     raise ValueError("invalid model")
                 return "expanded " + text
 
-            with patch("typelink.__main__.emit.expand", side_effect=expand):
+            with patch("typelink.commands.expand.emit.expand", side_effect=expand):
                 with redirect_stderr(error):
                     self.assertEqual(main(["expand", str(root)]), 1)
 
