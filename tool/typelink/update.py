@@ -46,6 +46,7 @@ def install_latest():
         persistent_checkout = cache_root / revision
         if not persistent_checkout.exists():
             try:
+                # Keep the editable install's source tree after the temporary clone exits.
                 checkout.replace(persistent_checkout)
             except FileExistsError:
                 if not persistent_checkout.is_dir():

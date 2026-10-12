@@ -84,6 +84,7 @@ def _read_source(repo_dir, relative_path, required=False, max_bytes=None, uri=No
     try:
         path.relative_to(root)
     except ValueError:
+        # Never allow a URL-derived path to escape the temporary checkout.
         if required:
             raise ValueError(f"linked source path escapes the cloned repository: {relative_path}")
         return None
@@ -126,6 +127,8 @@ def fetch_sources(uri, origin, max_bytes=DEFAULT_MAX_BYTES):
         linked_source = _read_source(
             repo_dir, source_path, required=True, max_bytes=max_bytes, uri=uri)
         suffixes = _SOURCE_SUFFIXES[origin]
+        # Only tracked source files are peer inputs; untracked and submodule
+        # contents are not implicitly added to the type-resolution context.
         source_paths = sorted({
             Path(path) for path in _tracked_files(repo_dir)
             if Path(path).suffix.lower() in suffixes

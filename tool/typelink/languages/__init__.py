@@ -22,6 +22,7 @@ class Importer:
 
 
 def register(origin):
+    """Register an importer class for one TypeOrigin enum literal."""
     def deco(cls):
         _REGISTRY[origin] = cls
         return cls
@@ -29,6 +30,7 @@ def register(origin):
 
 
 def get(origin):
+    """Create an importer for an origin, failing clearly when it is unregistered."""
     try:
         return _REGISTRY[origin]()
     except KeyError:
@@ -36,6 +38,7 @@ def get(origin):
 
 
 def origins():
+    """Return the registered origins in stable order."""
     return sorted(_REGISTRY)
 
 

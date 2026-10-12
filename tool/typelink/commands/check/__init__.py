@@ -1,3 +1,4 @@
+"""CLI command that validates TypeLink annotations and prints their JSON records."""
 import json
 import sys
 
@@ -14,6 +15,7 @@ def register(subparsers):
 
 
 def run(args):
+    """Collect valid links while reporting parse errors for each input file."""
     status, found = 0, []
     for file in (file for path in args.files for file in targets(path)):
         try:

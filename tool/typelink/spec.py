@@ -25,6 +25,7 @@ class Spec:
 
 
 def load(path=SPEC_FILE):
+    """Parse TypeOrigin and metadata declarations from the canonical SysML spec."""
     tree = sysml.parse(Path(path).read_text())
     P = sysml.P
     origins, metadata = None, {}
@@ -57,6 +58,7 @@ def sync_rfc(rfc=RFC_FILE, spec_dir=SPEC_DIR, write=True):
     new = old
     for name, lang in EMBEDDED.items():
         body = (Path(spec_dir) / name).read_text()
+        # The matching markers keep the RFC copy byte-for-byte tied to its source.
         new = _block(name, lang).sub(lambda m: m.group(1) + body + m.group(3), new)
     if new != old and write:
         Path(rfc).write_text(new)

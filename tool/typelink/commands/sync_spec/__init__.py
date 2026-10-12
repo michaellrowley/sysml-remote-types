@@ -1,3 +1,4 @@
+"""CLI adapter for synchronizing normative spec files into the RFC."""
 from ... import spec
 
 
@@ -8,5 +9,6 @@ def register(subparsers):
 
 
 def run(args):
+    """Rewrite the RFC's embedded spec blocks from their canonical files."""
     spec.sync_rfc()
     return 0

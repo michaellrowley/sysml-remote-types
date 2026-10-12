@@ -166,3 +166,13 @@ To add one, create a directory such as `commands/my_command/` with an
 available as `typelink my-command` without editing the CLI dispatcher or a
 central command list. Use a hyphenated parser name when the package name uses
 underscores, as with `sync_spec` / `sync-spec`.
+
+Type importers are similarly isolated under `tool/typelink/languages/`. Each
+importer returns the language-neutral model defined in `model.py`; the registry
+maps it to a `TypeOrigin` value from `spec/typelink.sysml`. Add the matching
+enum literal to `TypeOrigin` and run `typelink sync-spec`, then add an importer
+module with `@register("Origin")`, implement `Importer.import_type`, and import
+that module from `languages/__init__.py`. Add scalar-width metadata to
+`spec/types.json` when the language needs it. Kaitai generation consumes the
+normalized SysML model, keeping source-language parsing separate from
+output-format generation.

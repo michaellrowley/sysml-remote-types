@@ -1,3 +1,4 @@
+"""CLI command that expands linked source types into SysML metadata."""
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from .._files import targets
 
 
 def register(subparsers):
+    """Register expansion options; data-model choices come from the shared spec."""
     command = subparsers.add_parser(
         "expand", help="flesh out @TypeLink items (directory targets are expanded in place)")
     command.add_argument(
@@ -26,6 +28,7 @@ def register(subparsers):
 
 
 def run(args):
+    """Expand one file or process a directory as a best-effort batch."""
     directory = Path(args.file).is_dir()
     if directory and args.output:
         raise ValueError("--output cannot be used with a directory target")
@@ -49,6 +52,7 @@ def run(args):
                 ImportError_, ValueError, OSError) as ex:
             if not directory:
                 raise
+            # A bad file should not prevent other files in a directory from expanding.
             print(f"{file}: {ex}", file=sys.stderr)
             status = 1
     return status

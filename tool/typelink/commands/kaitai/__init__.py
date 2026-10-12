@@ -1,3 +1,4 @@
+"""CLI command that generates Kaitai schemas from SysML models."""
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ def register(subparsers):
 
 
 def run(args):
+    """Generate schemas, mirroring relative paths when an output directory is used."""
     directory = Path(args.file).is_dir()
     output_dir = Path(args.output) if directory and args.output else None
     if output_dir and output_dir.exists() and not output_dir.is_dir():
@@ -47,6 +49,7 @@ def run(args):
             with open(file) as source:
                 text = source.read()
             if not args.expanded:
+                # Normal input may still contain links; expanded input skips fetching.
                 text = emit.expand(
                     text, max_bytes=args.max_bytes, clone_repo=args.clone_repo,
                     warn=lambda message: print("warning:", message, file=sys.stderr))

@@ -1,3 +1,4 @@
+"""Behavioral coverage for parsing, importing, expansion, and CLI workflows."""
 import argparse
 import json
 import shutil

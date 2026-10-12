@@ -1,4 +1,8 @@
-"""Generate Kaitai Struct schemas from expanded or native SysMLv2 items."""
+"""Generate Kaitai Struct schemas from expanded or native SysMLv2 items.
+
+SysML metadata is first normalized into private item/field records. Rendering
+then handles in-memory layouts and Protobuf wire layouts through separate paths.
+"""
 from dataclasses import dataclass, field
 import re
 from typing import Dict, List, Optional, Set, Tuple
@@ -13,11 +17,14 @@ _PROTO_BYTES = "protobuf_bytes_payload"
 
 
 class KaitaiError(ValueError):
+    """A model or option cannot be represented by the Kaitai generator."""
+
     pass
 
 
 @dataclass
 class _Field:
+    """Normalized SysML feature plus the metadata needed to encode it."""
     name: str
     type_name: str
     lower: int = 1
@@ -32,6 +39,7 @@ class _Field:
 
 @dataclass(eq=False)
 class _Item:
+    """One top-level or nested SysML item definition being generated."""
     name: str
     layout: Optional[str] = None
     bits: Optional[int] = None
@@ -211,6 +219,7 @@ def _all_items(item):
 def _find_item(items, name, scope=None):
     target = _unquote(name).split("::")[-1]
     if scope is not None:
+        # Prefer a direct nested declaration before searching globally.
         local = [child for child in scope.children if child.name == target]
         if len(local) == 1:
             return local[0]
@@ -225,6 +234,7 @@ def _find_item(items, name, scope=None):
 
 
 def _assign_ids(root):
+    """Assign globally unique Kaitai IDs while preserving the SysML nesting path."""
     root.ksy_id = _identifier(root.name)
     names = {}
 
@@ -262,6 +272,7 @@ def _repeat_lines(member, lines, indent):
         if member.lower != 0:
             raise KaitaiError(
                 f"{member.name}: Kaitai repeat-to-end cannot enforce a minimum count")
+        # Kaitai supports a repeat-until-end form, but not a minimum with it.
         lines.append(f"{indent}repeat: eos")
     elif member.lower == member.upper:
         lines.append(f"{indent}repeat: expr")
@@ -275,6 +286,7 @@ def _primitive_type(kind, bits, signed, integer_signedness, field_name):
     if bits is None or bits <= 0:
         raise KaitaiError(f"{field_name}: a positive @DataSize is required")
     if kind in ("integer", "natural"):
+        # Kaitai has byte-sized signed primitives; other widths use bit fields.
         signed = (integer_signedness if signed is None else signed) \
             if kind == "integer" else False
         if bits in (8, 16, 32, 64):
@@ -316,6 +328,7 @@ def _seq_lines(item, items, integer_signedness):
         if member.lower == 0 and member.upper is None and index != len(item.fields) - 1:
             raise KaitaiError(f"{item.name}.{member.name}: repeat-to-end must be the last field")
         if item.layout == "struct":
+            # Explicit offsets preserve source gaps and catch overlapping fields.
             if member.offset is None:
                 raise KaitaiError(
                     f"{item.name}.{member.name}: offset-based layout has no known DataOffset")
@@ -419,6 +432,7 @@ def _padding_for_gap(item, start, end, indent):
     item.generated_ids.add(field_id)
     if start % 8 == 0 and gap % 8 == 0:
         return [f"{indent}- id: {field_id}", f"{indent}  size: {gap // 8}"]
+    # Non-byte-aligned gaps must be expressed as Kaitai bit fields (at most 64 bits).
     lines = []
     while gap:
         chunk = min(gap, 64)
@@ -437,6 +451,8 @@ def _message_contexts(tree):
 
 
 class _ProtoBuilder:
+    """Build helpers for Protobuf's tagged wire format and nested payloads."""
+
     def __init__(self, root, items):
         self.root = root
         self.items = items
@@ -466,6 +482,7 @@ class _ProtoBuilder:
         source = source_type.split(".")[-1]
         raw = "raw.value"
         if kind == "zigzag" or source in ("sint32", "sint64"):
+            # Reverse Protobuf's zigzag mapping from the decoded varint to a signed value.
             expression = f"{raw} % 2 == 0 ? {raw} / 2 : -({raw} / 2) - 1"
         elif source in ("int32", "sint32") or kind == "enum":
             value = f"({raw} % 4294967296)"
@@ -494,6 +511,7 @@ class _ProtoBuilder:
     def _length_payload(self, owner, suffix, kind, source_type, target=None):
         name = _identifier(f"_pb_{owner}_{suffix}")
         body = ["seq:", "  - id: length", f"    type: {_PROTO_VARINT}"]
+        # A length prefix bounds parsing to exactly one bytes/string/message/map body.
         if kind == "string":
             body.extend(("  - id: value", "    type: str", "    size: length.value"))
         elif kind == "bytes":
@@ -514,6 +532,7 @@ class _ProtoBuilder:
         return self._register(name, body)
 
     def _packed_payload(self, owner, suffix, source_type, kind):
+        """Decode packed repeated scalars as a length-delimited sequence."""
         scalar = self._scalar_payload(owner, suffix + "_element", source_type, kind)
         packed = self._register(
             _identifier(f"_pb_{owner}_{suffix}_values"),
@@ -594,6 +613,7 @@ class _ProtoBuilder:
         raise KaitaiError(f"{item.name}.{member.name}: unsupported Protobuf kind {kind!r}")
 
     def _field_parser_body(self, cases):
+        """Dispatch by Protobuf's combined (field number * 8 + wire type) tag."""
         lines = [
             "seq:",
             "  - id: tag",
@@ -605,6 +625,7 @@ class _ProtoBuilder:
         ]
         for tag in sorted(cases):
             lines.append(f"        {tag}: {cases[tag]}")
+        # Unknown field numbers still consume their payload according to wire type.
         lines.append(f"        _: {_PROTO_UNKNOWN}(tag.value % 8)")
         return lines
 
@@ -659,6 +680,7 @@ class _ProtoBuilder:
                             value_type, value_kind)[0] == "message":
                         root_is_referenced |= _find_item(self.items, value_type, item) is self.root
         if root_is_referenced:
+            # A self-referencing message needs a named body type beneath the root.
             self.root.message_type_id = _identifier(f"{self.root.ksy_id}__body")
         for item in self.items:
             if item.layout != "protobuf":
@@ -738,6 +760,7 @@ class _HelperType:
 
 def _render_types(root, items, helpers, protobuf_bodies=None,
                   integer_signedness=False):
+    """Render referenced item bodies and parser helpers into Kaitai's `types` block."""
     types = []
     for item in items:
         if item is root:
@@ -783,6 +806,7 @@ def _render_seq(item, items, integer_signedness):
 
 
 def _root_item(text, name):
+    """Select the requested item, rejecting ambiguous or implicit multi-root input."""
     tree = sysml.parse(text)
     contexts = list(sysml.find_all(tree, P.ItemDefinitionContext))
     if name is not None:
@@ -839,6 +863,7 @@ def generate(text, item=None, endian="le", bit_endian="le",
         "meta:",
         f"  id: {root.ksy_id}",
         f"  endian: {endian}",
+        # Protobuf's wire format fixes bit order independently of the caller's option.
         f"  bit-endian: {'be' if root.layout == 'protobuf' else bit_endian}",
         f"  encoding: {encoding}",
         *sequence,

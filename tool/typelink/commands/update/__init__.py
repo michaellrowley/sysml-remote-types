@@ -1,3 +1,4 @@
+"""CLI adapter for installing the latest published main-branch version."""
 import sys
 
 from ... import update
@@ -10,6 +11,7 @@ def register(subparsers):
 
 
 def run(args):
+    """Install the latest revision and report the short revision identifier."""
     try:
         revision = update.install_latest()
     except update.UpdateError as ex:
