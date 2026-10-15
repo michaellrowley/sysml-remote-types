@@ -239,7 +239,8 @@ class _CRenderer:
                     f"{qualifier}{base} *{_identifier(param.name)}")
             elif param.type_name in ("ScalarValues::String", "str"):
                 parameters.append(f"const {base} {_identifier(param.name)}")
-            elif not is_scalar:
+            elif not (_SCALARS.get(param.type_name, (None, False))[1]
+                      or re.fullmatch(r"b[0-9]+", param.type_name) is not None):
                 parameters.append(f"const {base} *{_identifier(param.name)}")
             else:
                 parameters.append(f"{base} {_identifier(param.name)}")
