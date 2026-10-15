@@ -144,14 +144,9 @@ class _CRenderer:
         visited = set()
 
         def nested_records(record, path):
-            yield record, path
             for child in record.nested:
                 yield from nested_records(child, path + (_identifier(child.name),))
-
-        def root_record(path):
-            while path[:-1] in self.records:
-                path = path[:-1]
-            return path
+            yield record, path
 
         def visit(path):
             if path in visited:
@@ -161,26 +156,25 @@ class _CRenderer:
                     f"cyclic by-value or inheritance dependency involving {'::'.join(path)}")
             visiting.add(path)
             namespace_path = path[:-1]
-            for record, owner_path in nested_records(self.records[path], path):
-                dependencies = list(record.bases)
-                for field in record.fields:
-                    dependencies.append(field.type_name)
-                    dependencies.extend(field.alternatives)
-                for name in dependencies:
-                    dependency = self._resolve_record(name, namespace_path, owner_path)
-                    if dependency == owner_path:
-                        raise HeaderError(f"{'::'.join(owner_path)} contains itself by value")
-                    if dependency is not None:
-                        dependency_root = root_record(dependency)
-                        if dependency_root != path:
-                            visit(dependency_root)
+            record = self.records[path]
+            dependencies = list(record.bases)
+            for field in record.fields:
+                dependencies.append(field.type_name)
+                dependencies.extend(field.alternatives)
+            for name in dependencies:
+                dependency = self._resolve_record(name, namespace_path, path)
+                if dependency == path:
+                    raise HeaderError(f"{'::'.join(path)} contains itself by value")
+                if dependency is not None:
+                    visit(dependency)
             visiting.remove(path)
             visited.add(path)
-            ordered.append((path, self.records[path]))
+            ordered.append((path, record))
 
         for path in self.records:
             if path[:-1] not in self.records:
-                visit(path)
+                for _record, nested_path in nested_records(self.records[path], path):
+                    visit(nested_path)
         return ordered
 
     def _guard(self):
@@ -200,9 +194,6 @@ class _CRenderer:
 
     def _render_record(self, record, path, namespace_path, lines):
         name = self._c_name(path)
-        for child in record.nested:
-            self._render_record(
-                child, path + (_identifier(child.name),), namespace_path, lines)
         lines.append(f"struct {name} {{")
         for base in record.bases:
             base_path = self._resolve_record(base, namespace_path, path)
@@ -279,7 +270,10 @@ class _CRenderer:
         if self.records:
             lines.append("")
         for path, record in self._ordered_records():
-            self._render_record(record, path, path[:-1], lines)
+            namespace_path = path
+            while namespace_path[:-1] in self.records:
+                namespace_path = namespace_path[:-1]
+            self._render_record(record, path, namespace_path[:-1], lines)
 
         def functions(namespace, path=()):
             current = path + ((_identifier(namespace.name),) if namespace.name else ())
