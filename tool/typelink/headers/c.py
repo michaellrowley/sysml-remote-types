@@ -69,13 +69,16 @@ class _CRenderer:
         field_name = _identifier(name or field.name)
         base = self._base_type(field.type_name, namespace_path, owner_path)
         if field.upper is not None and field.lower == field.upper and field.lower != 1:
-            return f"{base} {field_name}[{field.lower}]"
+            return [f"{base} {field_name}[{field.lower}]"]
         if field.lower == 0 and field.upper == 1:
             return (
-                f"struct {{ bool has_value; {base} value; }} {field_name}")
+                ["struct {", "    bool has_value;", f"    {base} value;",
+                 f"}} {field_name}"])
         if field.upper is None or field.lower != field.upper:
-            return f"struct {{ {base} *data; size_t length; }} {field_name}"
-        return f"{base} {field_name}"
+            return (
+                ["struct {", f"    {base} *data;", "    size_t length;",
+                 f"}} {field_name}"])
+        return [f"{base} {field_name}"]
 
     def _ordered_records(self):
         ordered = []
@@ -147,8 +150,10 @@ class _CRenderer:
                          self._base_type(base, namespace_path, path))
             lines.append(f"    {base_type} base_{_identifier(base.split('::')[-1])};")
         for field in record.fields:
-            lines.append(
-                f"    {self._declaration(field, path, namespace_path)};")
+            declaration = self._declaration(field, path, namespace_path)
+            lines.extend(
+                f"    {line}" for line in declaration[:-1])
+            lines.append(f"    {declaration[-1]};")
         lines.append("};")
         prefix = _identifier(name.upper())
         if record.bits is not None:
@@ -176,7 +181,17 @@ class _CRenderer:
             else:
                 parameters.append(f"{base} {_identifier(param.name)}")
         name = self._c_name(namespace_path + (_identifier(function.name),))
-        lines = [f"static inline void {name}({', '.join(parameters) or 'void'}) {{"]
+        signature = f"static inline void {name}"
+        parameter_text = ", ".join(parameters) or "void"
+        if len(signature) + len(parameter_text) + 4 <= 88:
+            lines = [f"{signature}({parameter_text}) {{"]
+        elif parameters:
+            lines = [f"{signature}("]
+            lines.extend(
+                f"    {parameter}{',' if index < len(parameters) - 1 else ') {'}"
+                for index, parameter in enumerate(parameters))
+        else:
+            lines = [f"{signature}(void) {{"]
         for param in function.parameters:
             lines.append(f"    (void){_identifier(param.name)};")
         for connection in function.connections:

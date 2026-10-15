@@ -862,10 +862,26 @@ def _root_item(text, name):
         if sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is None:
             _item_from_context(context, context_items=context_items)
     if name is not None:
+        selector = _unquote(name)
+
+        def qualified_name(context):
+            packages = []
+            parent = context.parentCtx
+            while parent is not None:
+                if isinstance(parent, P.PackageContext):
+                    package = parent.packageDeclaration()
+                    if package is not None and package.identification() is not None:
+                        packages.append(_unquote(sysml.decl_name(package)))
+                parent = parent.parentCtx
+            declaration = sysml.find_first(context, P.DefinitionDeclarationContext)
+            item_name = _unquote(sysml.decl_name(declaration))
+            return "::".join(list(reversed(packages)) + [item_name])
+
         matches = [
             context for context in contexts
             if _unquote(sysml.decl_name(
-                sysml.find_first(context, P.DefinitionDeclarationContext))) == _unquote(name)
+                sysml.find_first(context, P.DefinitionDeclarationContext))) == selector
+            or qualified_name(context) == selector
         ]
         if not matches:
             raise KaitaiError(f"no item definition named {name!r} found")

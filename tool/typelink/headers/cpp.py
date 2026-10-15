@@ -169,12 +169,12 @@ class _CppRenderer:
         return ordered
 
     def _open_namespace(self, path, lines):
-        for part in path:
-            lines.append(f"namespace {part} {{")
+        if path:
+            lines.append(f"namespace {'::'.join(path)} {{")
 
     @staticmethod
     def _close_namespace(path, lines):
-        for _ in path:
+        if path:
             lines.append("}")
 
     def _render_record(self, record, path, namespace_path, indent=0):
@@ -239,8 +239,17 @@ class _CppRenderer:
             else:
                 value_type = "const " + value_type + "&"
             parameters.append(f"{value_type} {_identifier(param.name)}")
-        signature = f"{return_type} {_identifier(function.name)}({', '.join(parameters)})"
-        lines = [signature + " {"]
+        signature = f"{return_type} {_identifier(function.name)}"
+        parameter_text = ", ".join(parameters)
+        if len(signature) + len(parameter_text) + 3 <= 88:
+            lines = [f"{signature}({parameter_text}) {{"]
+        elif parameters:
+            lines = [f"{signature}("]
+            lines.extend(
+                f"    {parameter}{',' if index < len(parameters) - 1 else ') {'}"
+                for index, parameter in enumerate(parameters))
+        else:
+            lines = [f"{signature}() {{"]
         for connection in function.connections:
             lines.append(f"    // TODO: implement SysML action connection: {connection}")
         lines.append(f'    throw std::logic_error("TODO: implement {function.name}");')
@@ -259,19 +268,19 @@ class _CppRenderer:
             "#include <vector>",
             "",
         ]
-        for path, _record in self._ordered_records():
-            namespace_path = path[:-1]
-            self._open_namespace(namespace_path, lines)
-            lines.append(f"struct {_identifier(path[-1])};")
-            self._close_namespace(namespace_path, lines)
-        if self._record_names:
-            lines.append("")
-
+        record_namespace = None
         for path, record in self._ordered_records():
             namespace_path = path[:-1]
-            self._open_namespace(namespace_path, lines)
+            if namespace_path != record_namespace:
+                if record_namespace is not None:
+                    self._close_namespace(record_namespace, lines)
+                    lines.append("")
+                self._open_namespace(namespace_path, lines)
+                record_namespace = namespace_path
             lines.extend(self._render_record(record, path, namespace_path))
-            self._close_namespace(namespace_path, lines)
+            lines.append("")
+        if record_namespace is not None:
+            self._close_namespace(record_namespace, lines)
             lines.append("")
 
         for namespace_path, namespace in _namespaces(self.module.root):

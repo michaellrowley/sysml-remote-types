@@ -232,6 +232,17 @@ The C backend emits equivalent compile-time preprocessor constants. These
 values describe the Kaitai schema layout; they are not an in-memory
 serialization or Kaitai runtime parser.
 
+By default, `typelink header` runs the full precursor pipeline: it resolves
+`@TypeLink` annotations, generates a Kaitai schema for every top-level item,
+then writes the requested header. The `.ksy` files are written beside their
+matching headers (or mirrored in the `-o` directory); if a model contains
+multiple root items, each schema gets an item-qualified filename. Use
+`--skip-kaitai` to omit that stage. `--expanded` skips only TypeLink expansion;
+Kaitai generation still runs unless explicitly skipped. Models without
+Kaitai-generatable item layouts can use `--skip-kaitai` to generate headers
+without schemas. When the header is written to stdout, its `.ksy` sidecars are
+written beside the input SysML file.
+
 Action `in` parameters become function inputs. In C++, a single `out`
 parameter becomes the function return value and other outputs are references.
 In C, output and `inout` parameters are pointers. Generated function bodies
@@ -239,9 +250,10 @@ are stubs and include `TODO` annotations for SysML action succession
 connections; they intentionally do not implement execution order or runtime
 behavior.
 
-Pass a directory to process `.sysml` files recursively. Headers are written
-beside source files by default, or mirrored beneath the directory named by
-`-o`. `typelink header --help` lists the available backends and import options.
+Pass a directory to process `.sysml` files recursively, like `typelink kaitai`.
+Headers and schemas are written beside source files by default, or mirrored
+beneath the directory named by `-o`. `typelink header --help` lists the
+available backends and import options.
 
 The optional TypeLink expansion step reads only the linked file by default.
 `--max-bytes` caps the fetched resource; `--clone-repo` also indexes tracked

@@ -451,6 +451,7 @@ class HeaderGenerationTests(unittest.TestCase):
     def test_cpp_backend_emits_structs_layout_constants_and_action_stubs(self):
         output = headers.generate(self.MODEL)
 
+        self.assertIn("namespace Demo::Wire {", output)
         self.assertIn("#include <array>", output)
         self.assertIn("struct Packet : public Header", output)
         self.assertIn("std::array<std::int64_t, 4> values{}", output)
@@ -494,7 +495,9 @@ class HeaderGenerationTests(unittest.TestCase):
         self.assertIn("struct Demo_Wire_Packet {", output)
         self.assertIn("struct Demo_Wire_Header base_Header;", output)
         self.assertIn("int64_t values[4];", output)
-        self.assertIn("struct { bool has_value; bool value; } maybe;", output)
+        self.assertIn(
+            "struct {\n        bool has_value;\n        bool value;\n    } maybe;",
+            output)
         self.assertIn("#define DEMO_WIRE_HEADER_KAITAI_SIZE_BITS 16", output)
         self.assertIn(
             "/* TODO: implement SysML action connection: then validate; */", output)
@@ -782,6 +785,22 @@ item def Second { attribute value : ScalarValues::Integer { @DataSize { bits = 8
             kaitai.generate(model)
         self.assertIn("id: second", kaitai.generate(model, item="Second"))
 
+    def test_selects_qualified_item_when_namespaces_reuse_a_name(self):
+        model = '''package First {
+    item def Packet {
+        attribute first_value : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+}
+package Second {
+    item def Packet {
+        attribute second_value : ScalarValues::Integer { @DataSize { bits = 16; } }
+    }
+}'''
+        schema = kaitai.generate(model, item="Second::Packet")
+        self.assertIn("  id: packet", schema)
+        self.assertIn("  - id: second_value", schema)
+        self.assertNotIn("first_value", schema)
+
 
 class RepositoryTests(unittest.TestCase):
     def test_clone_mode_is_opt_in(self):
@@ -975,22 +994,74 @@ class CliTests(unittest.TestCase):
             output = Path(temp) / "model.hpp"
             source.write_text(
                 "package Demo { item def Packet { "
-                "attribute kind : ScalarValues::Integer; } }")
+                "attribute kind : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } } }")
 
             self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
             self.assertIn("namespace Demo {", output.read_text())
             self.assertIn("struct Packet {", output.read_text())
+            self.assertIn("id: packet", (Path(temp) / "model.ksy").read_text())
 
     def test_header_command_mirrors_directory_tree(self):
         with tempfile.TemporaryDirectory() as temp:
             source_dir = Path(temp) / "models"
             nested = source_dir / "nested"
             nested.mkdir(parents=True)
-            (nested / "packet.sysml").write_text("item def Packet { }")
+            (nested / "packet.sysml").write_text(
+                "item def Packet { attribute value : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
             output_dir = Path(temp) / "headers"
 
             self.assertEqual(main(["header", str(source_dir), "-o", str(output_dir)]), 0)
             self.assertTrue((output_dir / "nested" / "packet.hpp").exists())
+            self.assertTrue((output_dir / "nested" / "packet.ksy").exists())
+
+    def test_header_command_generates_one_schema_per_root_item(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "models.sysml"
+            output = Path(temp) / "models.hpp"
+            source.write_text(
+                "item def First { attribute one : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } } "
+                "item def Second { attribute two : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            self.assertTrue((Path(temp) / "models_first.ksy").exists())
+            self.assertTrue((Path(temp) / "models_second.ksy").exists())
+
+    def test_header_precursor_selects_duplicate_names_by_namespace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "models.sysml"
+            output = Path(temp) / "models.hpp"
+            source.write_text('''package First {
+    item def Packet {
+        attribute first_value : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+}
+package Second {
+    item def Packet {
+        attribute second_value : ScalarValues::Integer { @DataSize { bits = 16; } }
+    }
+}''')
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            first = (Path(temp) / "models_first_packet.ksy").read_text()
+            second = (Path(temp) / "models_second_packet.ksy").read_text()
+            self.assertIn("first_value", first)
+            self.assertNotIn("second_value", first)
+            self.assertIn("second_value", second)
+
+    def test_header_command_can_skip_kaitai_precursor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "model.sysml"
+            output = Path(temp) / "model.hpp"
+            source.write_text("item def Packet { }")
+
+            self.assertEqual(
+                main(["header", str(source), "-o", str(output), "--skip-kaitai"]), 0)
+            self.assertTrue(output.exists())
+            self.assertFalse((Path(temp) / "model.ksy").exists())
 
     def test_new_command_package_needs_no_dispatcher_change(self):
         module_name = f"{cli_commands.__name__}.future_command"
