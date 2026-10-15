@@ -228,14 +228,17 @@ class _CRenderer:
     def _function(self, function, namespace_path):
         parameters = []
         for param in function.parameters:
-            base, is_scalar = _SCALARS.get(param.type_name, (None, False))
             base = self._base_type(param.type_name, namespace_path, namespace_path)
             collection = (param.upper is None or param.lower != param.upper
                           or (param.upper is not None and param.upper > 1))
-            if param.direction in ("out", "inout") or collection or not is_scalar:
+            if param.direction in ("out", "inout") or collection:
                 qualifier = "const " if param.direction == "in" else ""
                 parameters.append(
                     f"{qualifier}{base} *{_identifier(param.name)}")
+            elif param.type_name in ("ScalarValues::String", "str"):
+                parameters.append(f"const {base} {_identifier(param.name)}")
+            elif not is_scalar:
+                parameters.append(f"const {base} *{_identifier(param.name)}")
             else:
                 parameters.append(f"{base} {_identifier(param.name)}")
         name = self._c_name(namespace_path + (_identifier(function.name),))
