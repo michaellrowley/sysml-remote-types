@@ -482,7 +482,40 @@ class HeaderGenerationTests(unittest.TestCase):
 
     def test_rejects_unregistered_backend(self):
         with self.assertRaisesRegex(headers.HeaderError, "unsupported header language"):
-            headers.generate("item def Packet { }", language="c")
+            headers.generate("item def Packet { }", language="rust")
+
+    def test_c_backend_flattens_namespaces_and_represents_inheritance(self):
+        output = headers.generate(self.MODEL, language="c")
+        other = headers.generate("item def Other { }", language="c")
+
+        self.assertNotEqual(output.splitlines()[0], other.splitlines()[0])
+        self.assertIn("#include <stdbool.h>", output)
+        self.assertIn("struct Demo_Wire_Header {", output)
+        self.assertIn("struct Demo_Wire_Packet {", output)
+        self.assertIn("struct Demo_Wire_Header base_Header;", output)
+        self.assertIn("int64_t values[4];", output)
+        self.assertIn("struct { bool has_value; bool value; } maybe;", output)
+        self.assertIn("#define DEMO_WIRE_HEADER_KAITAI_SIZE_BITS 16", output)
+        self.assertIn(
+            "/* TODO: implement SysML action connection: then validate; */", output)
+        self.assertIn("static inline void Demo_Wire_Parse(", output)
+
+    def test_c_header_compiles(self):
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if not compiler:
+            self.skipTest("C compiler is not installed")
+        output = headers.generate(self.MODEL, language="c")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.h"
+            source = Path(temp) / "check.c"
+            header.write_text(output)
+            source.write_text(
+                '#include "generated.h"\n'
+                "int main(void) { struct Demo_Wire_Packet p = {0}; return p.values[0]; }\n")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class KaitaiTests(unittest.TestCase):

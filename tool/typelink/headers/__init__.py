@@ -3,7 +3,7 @@ from importlib import import_module
 
 from .sysml import HeaderError, resolve
 
-_BACKENDS = {"cpp": "cpp"}
+_BACKENDS = {"c": "c", "cpp": "cpp"}
 
 
 def languages():

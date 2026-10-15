@@ -209,24 +209,27 @@ for a model that was expanded separately:
 
 ```sh
 typelink header examples/packet.sysml -o packet.hpp --expanded
-typelink header model.sysml --language cpp -o model.hpp
+typelink header model.sysml --language c -o model.h
 ```
 
-The current backend emits C++17. Item inheritance becomes public struct
+The `cpp` backend emits C++17. Item inheritance becomes public struct
 inheritance; attributes and item usages become typed members, with fixed,
 optional, and unbounded multiplicities represented by `std::array`,
 `std::optional`, and `std::vector`. Nested item definitions remain nested
-types, and package nesting becomes C++ namespaces. The header generator
-resolves a language-neutral declaration model before calling a backend, so
-additional output languages can be registered without coupling their
-renderers to SysML parsing.
+types, and package nesting becomes C++ namespaces. The `c` backend emits C11:
+it flattens package/type names into C identifiers, models inheritance through
+an embedded base member, and uses C arrays or pointer/length members for
+multiplicities. The header generator resolves a language-neutral declaration
+model before calling a backend, so additional output languages can be
+registered without coupling their renderers to SysML parsing.
 
-Generated classes contain a nested `kaitai_layout` descriptor with
+Generated C++ classes contain a nested `kaitai_layout` descriptor with
 `static constexpr` size and field offset/width values wherever the SysML
 contains the corresponding `@DataSize` and `@DataOffset` metadata used by
 Kaitai generation. Descriptors inherit metadata from generated base classes.
-These compile-time constants describe the Kaitai schema layout; they are not
-an in-memory serialization or Kaitai runtime parser.
+The C backend emits equivalent compile-time preprocessor constants. These
+values describe the Kaitai schema layout; they are not an in-memory
+serialization or Kaitai runtime parser.
 
 Action `in` parameters become function inputs. A single `out` parameter
 becomes the function return value; other output parameters are references.
