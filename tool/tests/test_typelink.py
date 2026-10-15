@@ -18,6 +18,7 @@ from typelink import (
     spec, sysml, update,
 )  # noqa: E402
 from typelink.__main__ import build_parser, main  # noqa: E402
+from typelink.headers.sysml import HeaderError, resolve as resolve_header  # noqa: E402
 
 KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
 
@@ -358,6 +359,57 @@ message Packet {
     def test_keyword_member_quoted(self):
         out = expand_with("C", "k", "struct k { int part; };")
         self.assertIn("attribute 'part'", out)
+
+
+class HeaderResolverTests(unittest.TestCase):
+    def test_resolves_nested_namespaces_records_and_action_connections(self):
+        model = '''package Demo {
+    package Wire {
+        item def Header {
+            @DataSize { bits = 16; }
+            attribute kind : ScalarValues::Integer {
+                @DataSize { bits = 8; }
+                @DataOffset { bits = 0; }
+            }
+        }
+        item def Packet specializes Header {
+            item header : Header;
+            attribute payload : ScalarValues::Integer[4];
+        }
+        action def Parse {
+            in item packet : Packet;
+            out item result : Packet;
+            first start;
+            then validate;
+        }
+    }
+}'''
+        module = resolve_header(model)
+        demo = module.root.namespaces[0]
+        wire = demo.namespaces[0]
+        header, packet = wire.records
+        action, = wire.functions
+
+        self.assertEqual((demo.name, wire.name), ("Demo", "Wire"))
+        self.assertEqual(header.bits, 16)
+        self.assertEqual(
+            (header.fields[0].name, header.fields[0].bits,
+             header.fields[0].offset_bits),
+            ("kind", 8, 0))
+        self.assertEqual(packet.bases, ["Header"])
+        self.assertEqual(packet.fields[1].lower, 4)
+        self.assertEqual(packet.nested, [])
+        self.assertEqual(
+            [(parameter.name, parameter.direction)
+             for parameter in action.parameters],
+            [("packet", "in"), ("result", "out")])
+        self.assertEqual(action.connections, ["first start;", "then validate;"])
+
+    def test_rejects_invalid_layout_metadata(self):
+        with self.assertRaisesRegex(HeaderError, "@bits must be a non-negative integer"):
+            resolve_header(
+                "item def Packet { attribute value : ScalarValues::Integer "
+                "{ @DataSize { bits = -1; } } }")
 
 
 class KaitaiTests(unittest.TestCase):
