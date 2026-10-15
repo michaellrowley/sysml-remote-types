@@ -14,10 +14,13 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from typelink import (
-    commands as cli_commands, emit, fetch, kaitai, languages, parser, repository,
+    commands as cli_commands, emit, fetch, headers, kaitai, languages, parser,
+    repository,
     spec, sysml, update,
 )  # noqa: E402
 from typelink.__main__ import build_parser, main  # noqa: E402
+from typelink.headers.c import render as render_c_header  # noqa: E402
+from typelink.headers.sysml import HeaderError, resolve as resolve_header  # noqa: E402
 
 KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
 
@@ -360,6 +363,712 @@ message Packet {
         self.assertIn("attribute 'part'", out)
 
 
+class HeaderResolverTests(unittest.TestCase):
+    def test_ignores_action_reference_without_feature_wrapper(self):
+        module = resolve_header(
+            "item def Packet {} action def Parse { ref packet; }")
+        self.assertEqual(module.root.functions[0].parameters, [])
+
+    def test_resolves_nested_namespaces_records_and_action_connections(self):
+        model = '''package Demo {
+    package Wire {
+        item def Header {
+            @DataSize { bits = 16; }
+            attribute kind : ScalarValues::Integer {
+                @DataSize { bits = 8; }
+                @DataOffset { bits = 0; }
+            }
+        }
+        item def Packet specializes Header {
+            item def Payload {
+                attribute code : ScalarValues::Integer;
+            }
+            item header : Header;
+            item body : Payload;
+            attribute payload : ScalarValues::Integer[4];
+        }
+        action def Parse {
+            in item packet : Packet;
+            out item result : Packet;
+            first start;
+            then validate;
+        }
+    }
+}'''
+        module = resolve_header(model)
+        demo = module.root.namespaces[0]
+        wire = demo.namespaces[0]
+        header, packet = wire.records
+        action, = wire.functions
+
+        self.assertEqual((demo.name, wire.name), ("Demo", "Wire"))
+        self.assertEqual(header.bits, 16)
+        self.assertEqual(
+            (header.fields[0].name, header.fields[0].bits,
+             header.fields[0].offset_bits),
+            ("kind", 8, 0))
+        self.assertEqual(packet.bases, ["Header"])
+        self.assertEqual(packet.fields[2].lower, 4)
+        self.assertEqual(packet.nested[0].name, "Payload")
+        self.assertEqual(
+            [(parameter.name, parameter.direction)
+             for parameter in action.parameters],
+            [("packet", "in"), ("result", "out")])
+        self.assertEqual(action.connections, ["first start;", "then validate;"])
+
+    def test_rejects_invalid_layout_metadata(self):
+        with self.assertRaisesRegex(HeaderError, "@bits must be a non-negative integer"):
+            resolve_header(
+                "item def Packet { attribute value : ScalarValues::Integer "
+                "{ @DataSize { bits = -1; } } }")
+
+
+class HeaderGenerationTests(unittest.TestCase):
+    MODEL = '''package Demo {
+    package Wire {
+        item def Packet specializes Header {
+            item def Payload {
+                @DataSize { bits = 8; }
+                attribute code : ScalarValues::Integer {
+                    @DataSize { bits = 8; }
+                }
+            }
+            item body : Payload;
+            attribute values : ScalarValues::Integer[4] {
+                @DataSize { bits = 8; }
+                @DataOffset { bits = 16; }
+            }
+            attribute rest : ScalarValues::Integer[0..*] {
+                @DataSize { bits = 8; }
+            }
+        }
+        item def Header {
+            @DataSize { bits = 16; }
+            attribute kind : ScalarValues::Integer {
+                @DataSize { bits = 8; }
+                @DataOffset { bits = 0; }
+            }
+        }
+        action def Parse {
+            in item packet : Packet;
+            out item result : Packet;
+            first start;
+            then validate;
+        }
+    }
+}'''
+
+    def test_cpp_backend_emits_structs_layout_constants_and_action_stubs(self):
+        output = headers.generate(self.MODEL)
+
+        self.assertIn("namespace Demo::Wire {", output)
+        self.assertIn("#include <array>", output)
+        self.assertIn("struct Packet : public Header", output)
+        self.assertIn("std::array<std::uint8_t, 4> values{}", output)
+        self.assertIn("std::vector<std::uint8_t> rest{}", output)
+        self.assertIn("struct Payload {", output)
+        self.assertIn("struct kaitai_layout : Header::kaitai_layout", output)
+        self.assertIn("static constexpr std::size_t kind_offset_bits = 0;", output)
+        self.assertIn("static constexpr std::size_t values_size_bits = 8;", output)
+        self.assertIn("Packet Parse(const Packet& packet)", output)
+        self.assertIn("// TODO: implement SysML action connection: then validate;", output)
+        self.assertIn('throw std::logic_error("TODO: implement Parse");', output)
+        self.assertLess(output.index("struct Header {"), output.index("struct Packet :"))
+
+    def test_cpp_header_compiles(self):
+        compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("C++ compiler is not installed")
+        output = headers.generate(self.MODEL)
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.hpp"
+            source = Path(temp) / "check.cpp"
+            header.write_text(output)
+            source.write_text('#include "generated.hpp"\nint main() { Demo::Wire::Packet p; }\n')
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rejects_unregistered_backend(self):
+        with self.assertRaisesRegex(headers.HeaderError, "unsupported header language"):
+            headers.generate("item def Packet { }", language="rust")
+
+    def test_empty_record_does_not_require_a_kaitai_sequence(self):
+        output = headers.generate("item def Empty { }")
+        self.assertIn("struct Empty {", output)
+
+    def test_fieldless_sized_records_use_kaitai_padding(self):
+        output = headers.generate(
+            "item def Blob { @DataSize { bits = 64; } }")
+        self.assertIn("static constexpr std::size_t size_bits = 64;", output)
+        self.assertIn("std::array<std::uint8_t, 8> padding_0{}", output)
+        union_output = headers.generate(
+            "item def UnionBlob { "
+            "@DataLayout { kind = DataLayoutKind::Union; } "
+            "@DataSize { bits = 64; } }")
+        self.assertIn("std::array<std::uint8_t, 8> data{}", union_output)
+
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if not compiler:
+            self.skipTest("C compiler is not installed")
+        c_output = headers.generate(
+            "item def Blob { @DataSize { bits = 64; } }", language="c")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.h"
+            source = Path(temp) / "check.c"
+            header.write_text(c_output)
+            source.write_text('#include "generated.h"\nint main(void) { return 0; }\n')
+            result = subprocess.run(
+                [compiler, "-std=c11", "-pedantic-errors", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_c_empty_record_compiles_strictly_and_zero_arrays_fail(self):
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if not compiler:
+            self.skipTest("C compiler is not installed")
+        output = headers.generate("item def Empty { }", language="c")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.h"
+            source = Path(temp) / "check.c"
+            header.write_text(output)
+            source.write_text(
+                '#include "generated.h"\n'
+                "int main(void) { struct Empty empty = {0}; return empty.typelink_empty; }\n")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-pedantic-errors", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        zero_schema = '''meta:
+  id: packet
+seq:
+  - id: empty
+    type: u1
+    repeat: expr
+    repeat-expr: 0
+'''
+        with self.assertRaisesRegex(headers.HeaderError, "zero-length array"):
+            headers.generate(
+                "item def Packet { }", language="c",
+                schemas=[("Packet", zero_schema)])
+        zero_record_schema = '''meta:
+  id: packet
+seq:
+  - id: record
+    type: packet__helper
+    repeat: expr
+    repeat-expr: 0
+types:
+  packet__helper:
+    seq:
+      - id: value
+        type: u1
+'''
+        with self.assertRaisesRegex(headers.HeaderError, "zero-length array"):
+            headers.generate(
+                "item def Packet { }", language="c",
+                schemas=[("Packet", zero_record_schema)])
+
+    def test_c_backend_flattens_namespaces_and_represents_inheritance(self):
+        output = headers.generate(self.MODEL, language="c")
+        other = headers.generate("item def Other { }", language="c")
+
+        self.assertNotEqual(output.splitlines()[0], other.splitlines()[0])
+        self.assertIn("#include <stdbool.h>", output)
+        self.assertIn("struct Demo_Wire_Header {", output)
+        self.assertIn("struct Demo_Wire_Packet {", output)
+        self.assertIn("struct Demo_Wire_Header base_Header;", output)
+        self.assertIn("uint8_t values[4];", output)
+        self.assertIn("struct {", output)
+        self.assertIn("size_t length;", output)
+        self.assertIn("#define DEMO_WIRE_HEADER_KAITAI_SIZE_BITS 16", output)
+        self.assertIn(
+            "/* TODO: implement SysML action connection: then validate; */", output)
+        self.assertIn("static inline void Demo_Wire_Parse(", output)
+
+    def test_c_header_compiles(self):
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if not compiler:
+            self.skipTest("C compiler is not installed")
+        output = headers.generate(self.MODEL, language="c")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.h"
+            source = Path(temp) / "check.c"
+            header.write_text(output)
+            source.write_text(
+                '#include "generated.h"\n'
+                "int main(void) { struct Demo_Wire_Packet p = {0}; return p.values[0]; }\n")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_c_keywords_string_inputs_and_nested_dependency_order(self):
+        model = '''package A {
+    item def Packet {
+        item def Derived specializes Base {
+            attribute value : B;
+        }
+        item def B { attribute value : ScalarValues::Integer { @DataSize { bits = 8; } } }
+        item def Base { attribute value : ScalarValues::Integer { @DataSize { bits = 8; } } }
+        attribute 'static' : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    item def 'struct' { }
+    action def 'switch' {
+        in attribute text : ScalarValues::String;
+        in item packet : Packet;
+        out attribute output_text : ScalarValues::String;
+    }
+}'''
+        schemas = [("A::Packet", '''meta:
+  id: packet
+seq:
+  - id: static
+    type: u1
+types:
+  packet__derived:
+    seq:
+      - id: value
+        type: packet__b
+  packet__b:
+    seq:
+      - id: value
+        type: u1
+  packet__base:
+    seq:
+      - id: value
+        type: u1
+''')]
+        output = headers.generate(model, language="c", schemas=schemas)
+        self.assertIn("uint8_t static_;", output)
+        self.assertIn("struct A_struct_ {", output)
+        self.assertIn("struct A_Packet_Derived;", output)
+        self.assertLess(output.index("struct A_Packet_Base {"),
+                        output.index("struct A_Packet_Derived {"))
+        self.assertLess(output.index("struct A_Packet_B {"),
+                        output.index("struct A_Packet_Derived {"))
+        self.assertIn("const char *text", output)
+        self.assertIn("char **output_text", output)
+        self.assertIn("A_switch_", output)
+        self.assertIn("const struct A_Packet *packet", output)
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if compiler:
+            with tempfile.TemporaryDirectory() as temp:
+                header = Path(temp) / "generated.h"
+                source = Path(temp) / "check.c"
+                header.write_text(output)
+                source.write_text(
+                    '#include "generated.h"\nint main(void) { return 0; }\n')
+                result = subprocess.run(
+                    [compiler, "-std=c11", "-pedantic-errors", "-fsyntax-only",
+                     str(source)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cpp_nested_dependencies_and_inline_action_stubs_link(self):
+        model = '''package A {
+    item def Packet {
+        item def Derived specializes Base {
+            attribute value : B;
+        }
+        item def B { attribute value : ScalarValues::Integer { @DataSize { bits = 8; } } }
+        item def Base { attribute value : ScalarValues::Integer { @DataSize { bits = 8; } } }
+    }
+    action def Parse { in item packet : Packet; }
+}'''
+        schema = '''meta:
+  id: packet
+seq: []
+types:
+  packet__derived:
+    seq:
+      - id: value
+        type: packet__b
+  packet__b:
+    seq:
+      - id: value
+        type: u1
+  packet__base:
+    seq:
+      - id: value
+        type: u1
+'''
+        output = headers.generate(model, schemas=[("A::Packet", schema)])
+        packet = output.split("struct Packet {", 1)[1].split("\n};", 1)[0]
+        self.assertLess(packet.index("struct Base {"), packet.index("struct Derived :"))
+        self.assertLess(packet.index("struct B {"), packet.index("struct Derived :"))
+        self.assertIn("inline void Parse(", output)
+        compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("C++ compiler is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.hpp"
+            header.write_text(output)
+            (Path(temp) / "a.cpp").write_text(
+                '#include "generated.hpp"\n'
+                'void a() { A::Parse(A::Packet{}); }\n'
+                'int main() { a(); return 0; }\n')
+            (Path(temp) / "b.cpp").write_text(
+                '#include "generated.hpp"\nvoid b() { A::Parse(A::Packet{}); }\n')
+            result = subprocess.run(
+                [compiler, "-std=c++17", str(Path(temp) / "a.cpp"),
+                 str(Path(temp) / "b.cpp"), "-o", str(Path(temp) / "linked")],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_nested_by_value_cycles_are_rejected(self):
+        model = '''item def Packet {
+    item def First { }
+    item def Second { }
+}'''
+        schema = '''meta:
+  id: packet
+seq:
+  - id: first
+    type: packet__first
+types:
+  packet__first:
+    seq:
+      - id: second
+        type: packet__second
+  packet__second:
+    seq:
+      - id: first
+        type: packet__first
+'''
+        for language in ("c", "cpp"):
+            with self.subTest(language=language):
+                with self.assertRaisesRegex(headers.HeaderError, "cyclic"):
+                    headers.generate(
+                        model, language=language, schemas=[("Packet", schema)])
+
+    def test_cpp_resolves_base_through_intermediate_namespace(self):
+        model = '''package A {
+    item def Base {
+        @DataSize { bits = 8; }
+        attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    package B {
+        item def Derived specializes Base { }
+    }
+}'''
+        output = headers.generate(model)
+        self.assertLess(output.index("struct Base {"), output.index("struct Derived :"))
+        derived_body = output.split("struct Derived :", 1)[1].split("};", 1)[0]
+        self.assertNotIn("kind{}", derived_body)
+        compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("C++ compiler is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.hpp"
+            source = Path(temp) / "check.cpp"
+            header.write_text(output)
+            source.write_text(
+                '#include "generated.hpp"\n'
+                "int main() { A::B::Derived value; return value.kind; }\n")
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_c_nested_records_follow_dependencies(self):
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        model = '''item def Packet {
+    attribute tag : ScalarValues::Integer { @DataSize { bits = 8; } }
+    item def Derived specializes Base {
+        item payload : Payload;
+    }
+    item def Payload {
+        attribute value : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    item def Base {
+        attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+}'''
+        output = render_c_header(resolve_header(model))
+
+        self.assertLess(
+            output.index("struct Packet_Base {"),
+            output.index("struct Packet_Derived {"))
+        self.assertLess(
+            output.index("struct Packet_Payload {"),
+            output.index("struct Packet_Derived {"))
+        if not compiler:
+            self.skipTest("C compiler is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.h"
+            source = Path(temp) / "check.c"
+            header.write_text(output)
+            source.write_text(
+                '#include "generated.h"\n'
+                "int main(void) { struct Packet_Derived value = {0}; "
+                "return value.base_Base.kind; }\n")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_record_fields_come_from_ksy_but_model_relationships_remain(self):
+        model = '''package Demo {
+    item def Base {
+        attribute declared : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    item def Packet specializes Base {
+        attribute model_only : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    action def Decode {
+        in item packet : Packet;
+        first start;
+        then parse;
+    }
+}'''
+        schemas = [
+            ("Demo::Base", '''meta:
+  id: base
+seq:
+  - id: declared
+    type: u1
+'''),
+            ("Demo::Packet", '''meta:
+  id: packet
+seq:
+  - id: declared
+    type: u1
+  - id: wire_value
+    type: u2
+  - id: label
+    type: str
+    size: 4
+  - id: flags
+    type: b3
+  - id: optional_value
+    type: u1
+    if: flags != 0
+  - id: choice
+    type:
+      switch-on: flags
+      cases:
+        0: u1
+        1: u4
+  - id: remainder
+    type: u1
+    repeat: eos
+'''),
+        ]
+
+        cpp = headers.generate(model, schemas=schemas)
+        c = headers.generate(model, language="c", schemas=schemas)
+        self.assertIn("struct Packet : public Base", cpp)
+        self.assertIn("std::uint16_t wire_value{}", cpp)
+        self.assertIn("std::array<char, 4> label{}", cpp)
+        self.assertIn("std::optional<std::uint8_t> optional_value{}", cpp)
+        self.assertIn("std::variant<std::uint8_t, std::uint32_t> choice{}", cpp)
+        self.assertIn("std::vector<std::uint8_t> remainder{}", cpp)
+        self.assertNotIn("model_only", cpp)
+        packet_body = cpp.split("struct Packet : public Base {", 1)[1].split("};", 1)[0]
+        self.assertNotIn("declared", packet_body)
+        self.assertIn("static inline void Demo_Decode", c)
+        self.assertIn("uint16_t wire_value;", c)
+        self.assertIn("char label[4];", c)
+        self.assertIn("union {", c)
+        self.assertNotIn("model_only", c)
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if compiler:
+            with tempfile.TemporaryDirectory() as temp:
+                header = Path(temp) / "generated.h"
+                source = Path(temp) / "check.c"
+                header.write_text(c)
+                source.write_text(
+                    '#include "generated.h"\nint main(void) { return 0; }\n')
+                result = subprocess.run(
+                    [compiler, "-std=c11", "-fsyntax-only", str(source)],
+                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cpp_generated_from_ksy_compiles(self):
+        compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("C++ compiler is not installed")
+        model = "item def Packet { attribute value : ScalarValues::Integer; }"
+        schema = '''meta:
+  id: packet
+seq:
+  - id: value
+    type: u2
+'''
+        output = headers.generate(model, schemas=[("Packet", schema)])
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.hpp"
+            source = Path(temp) / "check.cpp"
+            header.write_text(output)
+            source.write_text('#include "generated.hpp"\nint main() { Packet p; }\n')
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rejects_unsupported_ksy_shape(self):
+        model = "item def Packet { }"
+        for sequence, message in (
+            ("  - id: value\n    type: u1\n    repeat: invalid\n", "repeat mode"),
+            ("  - id: value\n    type: b128\n", "exceeds 64 bits"),
+        ):
+            with self.subTest(sequence=sequence):
+                with self.assertRaisesRegex(headers.HeaderError, message):
+                    schema = f"meta:\n  id: packet\nseq:\n{sequence}"
+                    headers.generate(model, schemas=[("Packet", schema)])
+
+    def test_ksy_repeats_presence_substreams_and_alignment(self):
+        model = "item def Packet { }"
+        schema = '''meta:
+  id: packet
+seq:
+  - id: flags
+    type: b3
+  - id: word
+    type: u1
+  - id: helper
+    type: packet__helper
+    size: 4
+  - id: after_helper
+    type: u1
+  - id: payload
+    size: 4
+    repeat: expr
+    repeat-expr: 3
+    if: flags != 0
+types:
+  packet__helper:
+    seq:
+      - id: byte
+        type: u1
+'''
+        cpp = headers.generate(model, schemas=[("Packet", schema)])
+        c = headers.generate(model, language="c", schemas=[("Packet", schema)])
+        self.assertIn("std::uint8_t word{}", cpp)
+        self.assertIn("std::size_t word_offset_bits = 8;", cpp)
+        self.assertIn("std::size_t after_helper_offset_bits = 48;", cpp)
+        self.assertIn("std::size_t payload_offset_bits = 56;", cpp)
+        self.assertIn(
+            "std::optional<std::array<std::array<std::uint8_t, 4>, 3>> payload{}",
+            cpp)
+        self.assertIn("static constexpr bool has_size = false;", cpp)
+        self.assertIn("uint8_t value[3][4];", c)
+        self.assertIn("bool has_value;", c)
+
+        dynamic = '''meta:
+  id: packet
+seq:
+  - id: data
+    size: _root.length
+'''
+        self.assertIn(
+            "std::vector<std::uint8_t> data{}",
+            headers.generate(model, schemas=[("Packet", dynamic)]))
+        self.assertIn(
+            "size_t length;",
+            headers.generate(model, language="c", schemas=[("Packet", dynamic)]))
+
+    def test_switch_variants_preserve_repeat_and_conditional_wrappers(self):
+        schema = '''meta:
+  id: packet
+seq:
+  - id: count
+    type: u1
+  - id: fixed_choice
+    type:
+      switch-on: count
+      cases:
+        0: u1
+        1: u2
+    repeat: expr
+    repeat-expr: 2
+  - id: optional_choices
+    type:
+      switch-on: count
+      cases:
+        0: u1
+        1: u2
+    repeat: eos
+    if: count != 0
+'''
+        model = "item def Packet { }"
+        cpp = headers.generate(model, schemas=[("Packet", schema)])
+        c = headers.generate(model, language="c", schemas=[("Packet", schema)])
+        self.assertIn(
+            "std::array<std::variant<std::uint8_t, std::uint16_t>, 2> fixed_choice{}",
+            cpp)
+        self.assertIn(
+            "std::optional<std::vector<std::variant<std::uint8_t, std::uint16_t>>> "
+            "optional_choices{}",
+            cpp)
+        self.assertIn("} fixed_choice[2];", c)
+        self.assertIn("bool has_value;", c)
+        self.assertIn("} *data;", c)
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if compiler:
+            with tempfile.TemporaryDirectory() as temp:
+                header = Path(temp) / "generated.h"
+                source = Path(temp) / "check.c"
+                header.write_text(c)
+                source.write_text('#include "generated.h"\nint main(void) { return 0; }\n')
+                result = subprocess.run(
+                    [compiler, "-std=c11", "-pedantic-errors", "-fsyntax-only",
+                     str(source)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_schema_selection_and_nested_ownership(self):
+        model = '''package Demo {
+    item def Packet {
+        item def Outer {
+            @DataSize { bits = 8; }
+            item def Inner {
+                @DataSize { bits = 8; }
+                attribute value : ScalarValues::Integer { @DataSize { bits = 8; } }
+            }
+            item inner : Inner;
+        }
+        item outer : Outer;
+    }
+    item def Other {
+        attribute payload : ScalarValues::Integer { @DataSize { bits = 8; } }
+        item def Packet {
+            attribute nested_value : ScalarValues::Integer { @DataSize { bits = 8; } }
+        }
+    }
+}'''
+        schemas = headers.generate_schemas(model)
+        self.assertEqual(
+            [selector for selector, _schema in schemas],
+            ["Demo::Packet", "Demo::Other"])
+        output = headers.generate(model, schemas=schemas)
+        self.assertIn("struct Outer {", output)
+        self.assertIn("struct Inner {", output)
+        self.assertIn("Inner inner{}", output)
+        self.assertNotIn("KaitaiPacketOuterInner", output)
+
+    def test_referenced_top_level_records_are_embedded_as_schema_types(self):
+        model = '''package Demo {
+    item def Header {
+        @DataSize { bits = 8; }
+        item def Inner {
+            @DataSize { bits = 8; }
+            attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+        }
+        item inner : Inner;
+    }
+    item def Packet {
+        item header : Header;
+    }
+}'''
+        schemas = headers.generate_schemas(model)
+        output = headers.generate(model, schemas=schemas)
+        self.assertIn("Header header{}", output)
+        self.assertIn("struct Inner {", output)
+        self.assertIn("Inner inner{}", output)
+        self.assertNotIn("KaitaiPacketHeader", output)
+
+
 class KaitaiTests(unittest.TestCase):
     def cpp_round_trip(self, source=CPP_ROUND_TRIP_SRC, data_model=None, **options):
         expanded = expand_with("CPP", "Packet", source, data_model=data_model)
@@ -624,6 +1333,22 @@ item def Second { attribute value : ScalarValues::Integer { @DataSize { bits = 8
             kaitai.generate(model)
         self.assertIn("id: second", kaitai.generate(model, item="Second"))
 
+    def test_selects_qualified_item_when_namespaces_reuse_a_name(self):
+        model = '''package First {
+    item def Packet {
+        attribute first_value : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+}
+package Second {
+    item def Packet {
+        attribute second_value : ScalarValues::Integer { @DataSize { bits = 16; } }
+    }
+}'''
+        schema = kaitai.generate(model, item="Second::Packet")
+        self.assertIn("  id: packet", schema)
+        self.assertIn("  - id: second_value", schema)
+        self.assertNotIn("first_value", schema)
+
 
 class RepositoryTests(unittest.TestCase):
     def test_clone_mode_is_opt_in(self):
@@ -809,7 +1534,101 @@ class CliTests(unittest.TestCase):
             if isinstance(action, argparse._SubParsersAction))
         self.assertEqual(
             set(subparsers.choices),
-            {"check", "expand", "kaitai", "sync-spec", "update"})
+            {"check", "expand", "header", "kaitai", "sync-spec", "update"})
+
+    def test_header_command_writes_single_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "model.sysml"
+            output = Path(temp) / "model.hpp"
+            source.write_text(
+                "package Demo { item def Packet { "
+                "attribute kind : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } } }")
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            self.assertIn("namespace Demo {", output.read_text())
+            self.assertIn("struct Packet {", output.read_text())
+            self.assertIn("id: packet", (Path(temp) / "model.ksy").read_text())
+
+    def test_header_command_mirrors_directory_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source_dir = Path(temp) / "models"
+            nested = source_dir / "nested"
+            nested.mkdir(parents=True)
+            (nested / "packet.sysml").write_text(
+                "item def Packet { attribute value : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
+            output_dir = Path(temp) / "headers"
+
+            self.assertEqual(main(["header", str(source_dir), "-o", str(output_dir)]), 0)
+            self.assertTrue((output_dir / "nested" / "packet.hpp").exists())
+            self.assertTrue((output_dir / "nested" / "packet.ksy").exists())
+
+    def test_header_command_generates_one_schema_per_root_item(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "models.sysml"
+            output = Path(temp) / "models.hpp"
+            source.write_text(
+                "item def First { attribute one : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } } "
+                "item def Second { attribute two : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            self.assertTrue((Path(temp) / "models_first.ksy").exists())
+            self.assertTrue((Path(temp) / "models_second.ksy").exists())
+
+    def test_header_schema_sidecars_preserve_dotted_output_basename(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source.sysml"
+            output = Path(temp) / "model.v1.hpp"
+            source.write_text(
+                "item def First { attribute first_value : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } } "
+                "item def Second { attribute second_value : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            first = Path(temp) / "model.v1_first.ksy"
+            second = Path(temp) / "model.v1_second.ksy"
+            self.assertIn("first_value", first.read_text())
+            self.assertIn("second_value", second.read_text())
+
+    def test_header_precursor_selects_duplicate_names_by_namespace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "models.sysml"
+            output = Path(temp) / "models.hpp"
+            source.write_text('''package First {
+    item def Packet {
+        attribute first_value : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+}
+package Second {
+    item def Packet {
+        attribute second_value : ScalarValues::Integer { @DataSize { bits = 16; } }
+    }
+}''')
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            first = (Path(temp) / "models_first_packet.ksy").read_text()
+            second = (Path(temp) / "models_second_packet.ksy").read_text()
+            self.assertIn("first_value", first)
+            self.assertNotIn("second_value", first)
+            self.assertIn("second_value", second)
+
+    def test_header_command_can_skip_kaitai_precursor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "model.sysml"
+            output = Path(temp) / "model.hpp"
+            source.write_text(
+                "item def Packet { attribute kind : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
+
+            self.assertEqual(
+                main(["header", str(source), "-o", str(output), "--skip-kaitai"]), 0)
+            self.assertTrue(output.exists())
+            self.assertIn("std::uint8_t kind{}", output.read_text())
+            self.assertFalse((Path(temp) / "model.ksy").exists())
 
     def test_new_command_package_needs_no_dispatcher_change(self):
         module_name = f"{cli_commands.__name__}.future_command"

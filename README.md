@@ -103,6 +103,7 @@ flowchart LR
     MAIN --> DISCOVER["Discover commands/* packages"]
     DISCOVER --> CHECK["check"]
     DISCOVER --> EXPAND["expand"]
+    DISCOVER --> HEADER["header"]
     DISCOVER --> KAITAI["kaitai"]
     DISCOVER --> SYNC["sync-spec"]
     DISCOVER --> UPDATE["update"]
@@ -125,6 +126,12 @@ flowchart LR
     KAITAI -->|--expanded: skip link resolution| GENERATOR["Kaitai generator"]
     EXPANDED --> GENERATOR
     GENERATOR --> KSY["Kaitai .ksy"]
+
+    HEADER --> HEADER_RESOLVE["Resolve SysML namespaces and behavior"]
+    HEADER_RESOLVE --> HEADER_KSY["Generate Kaitai schemas"]
+    HEADER_KSY --> HEADER_IR["KSY-backed header model"]
+    HEADER_IR --> CPP["C++ / C backend"]
+    CPP --> HPP["Generated header"]
 
     SYNC --> SPEC["Canonical spec files"]
     SPEC --> RFC["Embedded RFC spec"]
@@ -193,6 +200,62 @@ limitations.
 For other import settings, run `typelink expand` first (for example,
 `typelink expand model.sysml --data-model MODEL -o expanded.sysml`), then
 generate from the resulting SysMLv2 with `typelink kaitai --expanded`.
+
+## Generate source headers
+
+`typelink header` translates SysML item definitions into C++ structs and
+translates `action def` behaviors into function stubs in their package
+namespaces. It resolves `@TypeLink` annotations by default; pass `--expanded`
+for a model that was expanded separately:
+
+```sh
+typelink header examples/packet.sysml -o packet.hpp --expanded
+typelink header model.sysml --language c -o model.h
+```
+
+The `cpp` backend emits C++17. Generated Kaitai schemas are the source of truth
+for record fields, primitive widths, repeats, nested types, and layout
+constants; SysML supplies namespaces, inheritance, and behavior declarations.
+Item inheritance becomes public struct inheritance; fixed, optional, and
+unbounded multiplicities are represented by `std::array`, `std::optional`, and
+`std::vector` where present in the schema. Nested item definitions remain
+nested types, and package nesting becomes C++ namespaces. The `c` backend emits
+C11: it flattens package/type names into C identifiers, models inheritance
+through an embedded base member, and uses C arrays or pointer/length members
+for multiplicities; optional values use a `has_value`/`value` wrapper. The
+header generator resolves a language-neutral declaration model before calling
+a backend, so additional output languages can be registered without coupling
+their renderers to SysML parsing.
+
+Generated C++ classes contain a nested `kaitai_layout` descriptor with
+`static constexpr` size and field offset/width values derived from the
+generated Kaitai schema. Descriptors inherit metadata from generated base
+classes. The C backend emits equivalent compile-time preprocessor constants.
+These values describe the Kaitai schema layout; they are not an in-memory
+serialization or Kaitai runtime parser.
+
+By default, `typelink header` runs the full precursor pipeline: it resolves
+`@TypeLink` annotations, generates Kaitai schemas, then writes the requested
+header. Those same schemas determine the header's record members. The `.ksy`
+files are written beside their matching headers (or mirrored in the `-o`
+directory); if a model contains multiple root items, each schema gets an
+item-qualified filename. Use `--skip-kaitai` to omit writing `.ksy` sidecars;
+schemas are still generated internally to determine header fields. `--expanded`
+skips only TypeLink expansion. Empty item definitions need no schema and remain
+empty declarations in the generated header. When the header is written to
+stdout, `.ksy` sidecars are written beside the input SysML file unless skipped.
+
+Action `in` parameters become function inputs. In C++, a single `out`
+parameter becomes the function return value and other outputs are references.
+In C, output and `inout` parameters are pointers. Generated function bodies
+are stubs and include `TODO` annotations for SysML action succession
+connections; they intentionally do not implement execution order or runtime
+behavior.
+
+Pass a directory to process `.sysml` files recursively, like `typelink kaitai`.
+Headers and schemas are written beside source files by default, or mirrored
+beneath the directory named by `-o`. `typelink header --help` lists the
+available backends and import options.
 
 The optional TypeLink expansion step reads only the linked file by default.
 `--max-bytes` caps the fetched resource; `--clone-repo` also indexes tracked
