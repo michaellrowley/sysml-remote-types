@@ -282,5 +282,7 @@ Field mappings:
 
 The generator normalizes item and field names to Kaitai identifiers. It emits
 the selected item as the schema root and its nested item definitions as Kaitai
-types. `examples/packet.sysml` and `examples/packet.ksy` are a native packed
-SysML input and its generated output.
+types. Fields inherited through `specializes` definitions are emitted before
+the selected item's directly declared fields. Missing or cyclic supertypes are
+errors, not silently omitted fields. `examples/packet.sysml` and
+`examples/packet.ksy` are a native packed SysML input and its generated output.

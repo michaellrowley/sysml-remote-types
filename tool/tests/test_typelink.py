@@ -425,6 +425,50 @@ class KaitaiTests(unittest.TestCase):
             out)
         self.assertNotIn("padding_", out)
 
+    def test_native_item_includes_fields_from_specialized_definitions(self):
+        model = '''item def Header {
+    attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+}
+item def ExtendedHeader specializes Header {
+    attribute flags : ScalarValues::Integer { @DataSize { bits = 16; } }
+}
+item def Packet specializes ExtendedHeader {
+    attribute payload_size : ScalarValues::Integer { @DataSize { bits = 32; } }
+}'''
+        out = kaitai.generate(model, item="Packet")
+        self.assertIn("  - id: kind\n    type: u1", out)
+        self.assertIn("  - id: flags\n    type: u2", out)
+        self.assertIn("  - id: payload_size\n    type: u4", out)
+        self.assertLess(out.index("id: kind"), out.index("id: flags"))
+        self.assertLess(out.index("id: flags"), out.index("id: payload_size"))
+
+    def test_native_item_rejects_unresolved_or_cyclic_supertypes(self):
+        with self.subTest(case="unresolved"):
+            with self.assertRaisesRegex(kaitai.KaitaiError, "supertype.*Missing"):
+                kaitai.generate(
+                    "item def Packet specializes Missing { "
+                    "attribute value : ScalarValues::Integer "
+                    "{ @DataSize { bits = 8; } } }")
+        with self.subTest(case="cyclic"):
+            model = '''item def First specializes Second { }
+item def Second specializes First { }'''
+            with self.assertRaisesRegex(kaitai.KaitaiError, "cyclic specialization"):
+                kaitai.generate(model, item="First")
+
+    def test_native_item_includes_nested_types_from_supertypes(self):
+        model = '''item def Header {
+    item def Payload {
+                @DataSize { bits = 16; }
+                attribute value : ScalarValues::Integer { @DataSize { bits = 16; } }
+            }
+    item payload : Payload;
+}
+item def Packet specializes Header { }'''
+        out = kaitai.generate(model, item="Packet")
+        self.assertIn("  - id: payload\n    type: packet__payload", out)
+        self.assertIn("  packet__payload:\n    seq:", out)
+        self.assertIn("      - id: value\n        type: u2", out)
+
     def test_native_scalar_mapping_and_signedness(self):
         model = '''item def Values {
     attribute signed_value : ScalarValues::Integer {

@@ -44,7 +44,9 @@ class _Item:
     layout: Optional[str] = None
     bits: Optional[int] = None
     fields: List[_Field] = field(default_factory=list)
+    bases: List[str] = field(default_factory=list)
     children: List["_Item"] = field(default_factory=list)
+    parent: Optional["_Item"] = field(default=None, repr=False)
     ksy_id: Optional[str] = None
     signed_instances: List[Tuple[str, str]] = field(default_factory=list)
     generated_ids: Set[str] = field(default_factory=set)
@@ -191,7 +193,7 @@ def _usage_fields(body):
         )
 
 
-def _item_from_context(context):
+def _item_from_context(context, parent=None, context_items=None):
     declaration = sysml.find_first(context, P.DefinitionDeclarationContext)
     if declaration is None:
         raise KaitaiError("item definition has no name")
@@ -200,12 +202,21 @@ def _item_from_context(context):
     layout = _metadata(body, "DataLayout").get("kind")
     layout = layout.lower() if layout else None
     size = _metadata(body, "DataSize")
-    item = _Item(name=_unquote(name), layout=layout, bits=_natural(size, "bits"))
+    item = _Item(name=_unquote(name), layout=layout, bits=_natural(size, "bits"),
+                 parent=parent)
+    if context_items is not None:
+        context_items[context] = item
+    subclassification = declaration.subclassificationPart()
+    if subclassification is not None:
+        item.bases = [
+            _unquote(base.qualifiedName().getText())
+            for base in subclassification.ownedSubclassification()
+        ]
     if body is None:
         return item
     for child in sysml.find_all(body, P.ItemDefinitionContext):
         if sysml.ancestor(child, P.DefinitionBodyContext) is body:
-            item.children.append(_item_from_context(child))
+            item.children.append(_item_from_context(child, item, context_items))
     item.fields = list(_usage_fields(body))
     return item
 
@@ -231,6 +242,43 @@ def _find_item(items, name, scope=None):
     if len(matches) > 1:
         raise KaitaiError(f"type {name!r} is ambiguous; qualify it or rename nested items")
     return None
+
+
+def _find_supertype(items, name, scope):
+    parts = [_unquote(part) for part in name.split("::")]
+    target = parts[-1]
+    ancestor = scope.parent
+    while ancestor is not None:
+        local = [child for child in ancestor.children if child.name == target]
+        if len(local) == 1:
+            return local[0]
+        if len(local) > 1:
+            raise KaitaiError(f"supertype {name!r} is ambiguous")
+        ancestor = ancestor.parent
+    matches = [item for item in items if item.name == target]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise KaitaiError(f"supertype {name!r} is ambiguous")
+    return None
+
+
+def _resolved_item(item, items, stack=()):
+    if item in stack:
+        raise KaitaiError(f"{item.name}: cyclic specialization")
+    fields = []
+    children = []
+    for base_name in item.bases:
+        base = _find_supertype(items, base_name, item)
+        if base is None:
+            raise KaitaiError(f"{item.name}: unresolved supertype {base_name!r}")
+        inherited = _resolved_item(base, items, (*stack, item))
+        fields.extend(inherited.fields)
+        children.extend(inherited.children)
+    for child in item.children:
+        children.append(_resolved_item(child, items, (*stack, item)))
+    fields.extend(item.fields)
+    return _Item(item.name, item.layout, item.bits, fields, [], children)
 
 
 def _assign_ids(root):
@@ -809,6 +857,10 @@ def _root_item(text, name):
     """Select the requested item, rejecting ambiguous or implicit multi-root input."""
     tree = sysml.parse(text)
     contexts = list(sysml.find_all(tree, P.ItemDefinitionContext))
+    context_items = {}
+    for context in contexts:
+        if sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is None:
+            _item_from_context(context, context_items=context_items)
     if name is not None:
         matches = [
             context for context in contexts
@@ -819,13 +871,21 @@ def _root_item(text, name):
             raise KaitaiError(f"no item definition named {name!r} found")
         if len(matches) > 1:
             raise KaitaiError(f"item definition {name!r} is ambiguous")
-        return tree, _item_from_context(matches[0])
-    top = _message_contexts(tree)
-    if len(top) != 1:
-        raise KaitaiError(
-            "select one top-level item with --item; "
-            f"found {len(top)} top-level item definitions")
-    return tree, _item_from_context(top[0])
+        selected = matches[0]
+    else:
+        top = _message_contexts(tree)
+        if len(top) != 1:
+            raise KaitaiError(
+                "select one top-level item with --item; "
+                f"found {len(top)} top-level item definitions")
+        selected = top[0]
+    if selected not in context_items:
+        selected_item = _item_from_context(selected)
+        model_items = list(_all_items(selected_item))
+    else:
+        selected_item = context_items[selected]
+        model_items = [item for item in context_items.values()]
+    return tree, _resolved_item(selected_item, model_items)
 
 
 def generate(text, item=None, endian="le", bit_endian="le",

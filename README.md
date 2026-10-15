@@ -155,6 +155,10 @@ contains more than one top-level item:
 typelink kaitai examples/packet.sysml --item Packet -o packet.ksy
 ```
 
+Fields inherited through `specializes` definitions are included before the
+selected item's directly declared fields. Unresolved or cyclic specialization
+is rejected rather than generating a partial schema.
+
 Pass a directory to generate a `.ksy` file for each `.sysml` file recursively.
 Schemas are written beside their source files by default; `-o` can instead
 name an output directory, where the source directory structure is mirrored.
