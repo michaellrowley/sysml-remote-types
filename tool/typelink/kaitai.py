@@ -881,7 +881,8 @@ def _root_item(text, name):
             context for context in contexts
             if _unquote(sysml.decl_name(
                 sysml.find_first(context, P.DefinitionDeclarationContext))) == selector
-            or qualified_name(context) == selector
+            or (sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is None
+                and qualified_name(context) == selector)
         ]
         if not matches:
             raise KaitaiError(f"no item definition named {name!r} found")
