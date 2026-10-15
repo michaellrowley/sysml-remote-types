@@ -19,6 +19,7 @@ from typelink import (
     spec, sysml, update,
 )  # noqa: E402
 from typelink.__main__ import build_parser, main  # noqa: E402
+from typelink.headers.c import render as render_c_header  # noqa: E402
 from typelink.headers.sysml import HeaderError, resolve as resolve_header  # noqa: E402
 
 KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
@@ -767,6 +768,43 @@ types:
                 "int main() { A::B::Derived value; return value.kind; }\n")
             result = subprocess.run(
                 [compiler, "-std=c++17", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_c_nested_records_follow_dependencies(self):
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        model = '''item def Packet {
+    attribute tag : ScalarValues::Integer { @DataSize { bits = 8; } }
+    item def Derived specializes Base {
+        item payload : Payload;
+    }
+    item def Payload {
+        attribute value : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    item def Base {
+        attribute kind : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+}'''
+        output = render_c_header(resolve_header(model))
+
+        self.assertLess(
+            output.index("struct Packet_Base {"),
+            output.index("struct Packet_Derived {"))
+        self.assertLess(
+            output.index("struct Packet_Payload {"),
+            output.index("struct Packet_Derived {"))
+        if not compiler:
+            self.skipTest("C compiler is not installed")
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.h"
+            source = Path(temp) / "check.c"
+            header.write_text(output)
+            source.write_text(
+                '#include "generated.h"\n'
+                "int main(void) { struct Packet_Derived value = {0}; "
+                "return value.base_Base.kind; }\n")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-fsyntax-only", str(source)],
                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

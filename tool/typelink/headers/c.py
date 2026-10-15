@@ -185,6 +185,11 @@ class _CRenderer:
         visiting = set()
         visited = set()
 
+        def nested_records(record, path):
+            for child in record.nested:
+                yield from nested_records(child, path + (_identifier(child.name),))
+            yield record, path
+
         def visit(path):
             if path in visited:
                 return
@@ -192,13 +197,14 @@ class _CRenderer:
                 raise HeaderError(
                     f"cyclic by-value or inheritance dependency involving {'::'.join(path)}")
             visiting.add(path)
+            namespace_path = path[:-1]
             record = self.records[path]
             dependencies = list(record.bases)
             for field in record.fields:
                 dependencies.append(field.type_name)
                 dependencies.extend(field.alternatives)
             for name in dependencies:
-                dependency = self._resolve_record(name, path[:-1], path)
+                dependency = self._resolve_record(name, namespace_path, path)
                 if dependency == path:
                     raise HeaderError(f"{'::'.join(path)} contains itself by value")
                 if dependency is not None:
@@ -208,7 +214,9 @@ class _CRenderer:
             ordered.append((path, record))
 
         for path in self.records:
-            visit(path)
+            if path[:-1] not in self.records:
+                for _record, nested_path in nested_records(self.records[path], path):
+                    visit(nested_path)
         return ordered
 
     def _guard(self):
@@ -311,7 +319,10 @@ class _CRenderer:
         if ordered:
             lines.append("")
         for path, record in ordered:
-            self._render_record(record, path, path[:-1], lines)
+            namespace_path = path
+            while namespace_path[:-1] in self.records:
+                namespace_path = namespace_path[:-1]
+            self._render_record(record, path, namespace_path[:-1], lines)
 
         def functions(namespace, path=()):
             current = path + ((_identifier(namespace.name),) if namespace.name else ())
