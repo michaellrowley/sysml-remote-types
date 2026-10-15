@@ -74,7 +74,9 @@ class _CRenderer:
         if not parts:
             return None
         candidates = [parts] if name.startswith("::") else [
-            owner_path + parts, namespace_path + parts, parts]
+            owner_path[:depth] + parts
+            for depth in range(len(owner_path), -1, -1)
+        ]
         return next((candidate for candidate in candidates if candidate in self.records), None)
 
     def _base_type(self, type_name, namespace_path, owner_path):
