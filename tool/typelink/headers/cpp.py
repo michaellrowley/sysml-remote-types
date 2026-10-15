@@ -91,19 +91,17 @@ class _CppRenderer:
         if value.startswith("::"):
             candidates = [raw]
         else:
-            candidates = [
-                owner_path + raw,
-                namespace_path + raw,
-                raw,
-            ]
+            candidates = [owner_path[:depth] + raw
+                          for depth in range(len(owner_path), -1, -1)]
         for candidate in candidates:
             if candidate in self._record_names:
                 return candidate
         return None
 
     def _type(self, type_name, field, namespace_path, owner_path):
-        if type_name == "str" and field.bits is not None:
-            scalar = f"std::array<char, {field.bits // 8}>"
+        if type_name in ("str", "bytes") and field.bits is not None:
+            byte_type = "char" if type_name == "str" else "std::uint8_t"
+            scalar = f"std::array<{byte_type}, {field.bits // 8}>"
         elif field.alternatives:
             alternatives = [
                 self._type_name(value, namespace_path, owner_path)
@@ -116,13 +114,21 @@ class _CppRenderer:
             width = int(type_name[1:])
             storage = next((size for size in (8, 16, 32, 64) if width <= size), 64)
             scalar = f"std::uint{storage}_t"
-        if (field.upper is not None and field.lower == field.upper
+        if type_name == "bytes" and field.bits is None:
+            if field.lower != 1 or field.upper != 1:
+                raise HeaderError(
+                    f"{field.name}: repeated dynamic byte blocks are unsupported")
+            scalar = "std::vector<std::uint8_t>"
+        elif (field.upper is not None and field.lower == field.upper
+                and field.lower == 0):
+            scalar = "std::array<std::uint8_t, 0>"
+        elif (field.upper is not None and field.lower == field.upper
                 and field.lower != 1):
             scalar = f"std::array<{scalar}, {field.lower}>"
-        elif field.lower == 0 and field.upper == 1:
-            scalar = f"std::optional<{scalar}>"
         elif field.upper is None or field.lower != field.upper:
             scalar = f"std::vector<{scalar}>"
+        if field.conditional or (field.lower == 0 and field.upper == 1):
+            scalar = f"std::optional<{scalar}>"
         return scalar
 
     def _type_name(self, type_name, namespace_path, owner_path):
@@ -216,7 +222,7 @@ class _CppRenderer:
         if bases:
             signature += " : " + ", ".join(bases)
         lines = [signature + " {"]
-        for nested in record.nested:
+        for nested in self._ordered_nested(record, path, namespace_path):
             lines.extend(self._render_record(
                 nested, path + (_identifier(nested.name),), namespace_path, indent + 4))
         for item in record.fields:
@@ -249,6 +255,53 @@ class _CppRenderer:
         lines.append(f"{pad}}};")
         return lines
 
+    def _ordered_nested(self, record, parent_path, namespace_path):
+        by_path = {
+            parent_path + (_identifier(child.name),): child
+            for child in record.nested
+        }
+        ordered = []
+        visiting = set()
+        visited = set()
+
+        def visit(path):
+            if path in visited:
+                return
+            if path in visiting:
+                raise HeaderError(
+                    f"cyclic nested type dependency involving {'::'.join(path)}")
+            visiting.add(path)
+            child = by_path[path]
+
+            def descendants(record, owner_path):
+                yield record, owner_path
+                for nested in record.nested:
+                    yield from descendants(
+                        nested, owner_path + (_identifier(nested.name),))
+
+            for descendant, owner_path in descendants(child, path):
+                dependencies = list(descendant.bases)
+                for field in descendant.fields:
+                    dependencies.append(field.type_name)
+                    dependencies.extend(field.alternatives)
+                for name in dependencies:
+                    dependency = self._resolve_record(
+                        name, namespace_path, owner_path)
+                    if dependency == owner_path or dependency == parent_path:
+                        raise HeaderError(
+                            f"{'::'.join(owner_path)} contains itself by value")
+                    if dependency is not None and dependency[:len(parent_path)] == parent_path:
+                        direct_dependency = parent_path + (dependency[len(parent_path)],)
+                        if direct_dependency != path and direct_dependency in by_path:
+                            visit(direct_dependency)
+            visiting.remove(path)
+            visited.add(path)
+            ordered.append(child)
+
+        for path in by_path:
+            visit(path)
+        return ordered
+
     def _render_function(self, function, namespace_path):
         outputs = [param for param in function.parameters if param.direction == "out"]
         return_field = outputs[0] if len(outputs) == 1 else None
@@ -271,14 +324,14 @@ class _CppRenderer:
         signature = f"{return_type} {_identifier(function.name)}"
         parameter_text = ", ".join(parameters)
         if len(signature) + len(parameter_text) + 3 <= 88:
-            lines = [f"{signature}({parameter_text}) {{"]
+            lines = [f"inline {signature}({parameter_text}) {{"]
         elif parameters:
-            lines = [f"{signature}("]
+            lines = [f"inline {signature}("]
             lines.extend(
                 f"    {parameter}{',' if index < len(parameters) - 1 else ') {'}"
                 for index, parameter in enumerate(parameters))
         else:
-            lines = [f"{signature}() {{"]
+            lines = [f"inline {signature}() {{"]
         for connection in function.connections:
             lines.append(f"    // TODO: implement SysML action connection: {connection}")
         lines.append(f'    throw std::logic_error("TODO: implement {function.name}");')

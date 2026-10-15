@@ -21,9 +21,10 @@ def generate_schemas(text):
     for selector in item_selectors(text):
         record = records.get(tuple(selector.split("::")))
         if (record is not None and not record.fields and not record.nested
-                and not record.bases):
+                and not record.bases and not record.bits):
             continue
-        schemas.append((selector, kaitai_generator.generate(text, item=selector)))
+        schemas.append((
+            selector, kaitai_generator.generate(text, item=f"::{selector}")))
     return schemas
 
 

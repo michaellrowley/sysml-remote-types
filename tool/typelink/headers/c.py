@@ -95,63 +95,95 @@ class _CRenderer:
 
     def _declaration(self, field, owner_path, namespace_path, name=None):
         field_name = _identifier(name or field.name)
-        if field.alternatives:
-            alternatives = [
-                f"{self._base_type(alt, namespace_path, owner_path)} case_{index};"
-                for index, alt in enumerate(field.alternatives)
-            ]
-            return ["union {", *(f"    {alternative}" for alternative in alternatives),
-                    f"}} {field_name}"]
-        if field.type_name == "str" and field.bits is not None:
-            size = field.bits // 8
-            if size == 0:
-                raise HeaderError(
-                    f"{field.name}: C cannot represent an empty fixed string")
-            if field.upper is not None and field.lower == field.upper:
-                if field.lower == 0:
+        if field.upper is not None and field.lower == field.upper == 0:
+            raise HeaderError(f"{field.name}: C cannot represent a zero-length array")
+
+        def value_declaration(value_name, indent=""):
+            if field.alternatives:
+                alternatives = [
+                    f"{self._base_type(alt, namespace_path, owner_path)} case_{index};"
+                    for index, alt in enumerate(field.alternatives)
+                ]
+                union = [
+                    f"{indent}union {{",
+                    *(f"{indent}    {alternative}" for alternative in alternatives),
+                    f"{indent}}}",
+                ]
+                if (field.lower == 0 and field.upper == 1) or (
+                        field.upper is not None and field.lower == field.upper):
+                    return [f"{union[0]}", *union[1:-1],
+                            f"{union[-1]} {value_name}[{field.lower}]"
+                            if field.lower not in (0, 1) else f"{union[-1]} {value_name}"]
+                if field.upper is None or field.lower != field.upper:
+                    return [
+                        f"{indent}struct {{",
+                        f"{indent}    union {{",
+                        *(f"{indent}        {alternative}" for alternative in alternatives),
+                        f"{indent}    }} *data;",
+                        f"{indent}    size_t length;",
+                        f"{indent}}} {value_name}",
+                    ]
+                return [*union[:-1], f"{union[-1]} {value_name}"]
+
+            if field.type_name in ("str", "bytes") and field.bits is not None:
+                element = "char" if field.type_name == "str" else "uint8_t"
+                block_size = field.bits // 8
+                if block_size == 0:
+                    raise HeaderError(f"{field.name}: C cannot represent an empty byte block")
+                base = element
+                suffix = f"[{block_size}]"
+            elif field.type_name == "bytes":
+                if field.lower != 1 or field.upper != 1:
                     raise HeaderError(
-                        f"{field.name}: C cannot represent a zero-length array")
-                return [f"char {field_name}[{field.lower}][{size}]"] \
-                    if field.lower != 1 else [f"char {field_name}[{size}]"]
+                        f"{field.name}: repeated dynamic byte blocks are unsupported")
+                return [
+                    f"{indent}struct {{",
+                    f"{indent}    uint8_t *data;",
+                    f"{indent}    size_t length;",
+                    f"{indent}}} {value_name}",
+                ]
+            else:
+                base = self._base_type(field.type_name, namespace_path, owner_path)
+                suffix = ""
+
             if field.lower == 0 and field.upper == 1:
-                return (
-                    ["struct {", "    bool has_value;", f"    char value[{size}];",
-                     f"}} {field_name}"])
-            if field.upper is None or field.lower != field.upper:
-                return (
-                    ["struct {", f"    char (*data)[{size}];", "    size_t length;",
-                     f"}} {field_name}"])
-            return [f"char {field_name}[{size}]"]
-        base = self._base_type(field.type_name, namespace_path, owner_path)
-        if field.type_name == "bytes" and field.bits is not None:
-            count = field.bits // 8
-            return [f"uint8_t {field_name}[{count}]"]
-        if field.upper is not None and field.lower == field.upper and field.lower != 1:
-            return [f"{base} {field_name}[{field.lower}]"]
-        if field.lower == 0 and field.upper == 1:
-            return (
-                ["struct {", "    bool has_value;", f"    {base} value;",
-                 f"}} {field_name}"])
-        if field.upper is None or field.lower != field.upper:
-            return (
-                ["struct {", f"    {base} *data;", "    size_t length;",
-                 f"}} {field_name}"])
-        return [f"{base} {field_name}"]
+                pass
+            elif field.upper is not None and field.lower == field.upper:
+                count = field.lower
+                if count != 1:
+                    suffix = f"[{count}]" + suffix
+            elif field.upper is None or field.lower != field.upper:
+                if suffix:
+                    return [
+                        f"{indent}struct {{",
+                        f"{indent}    {base} (*data){suffix};",
+                        f"{indent}    size_t length;",
+                        f"{indent}}} {value_name}",
+                    ]
+                return [
+                    f"{indent}struct {{",
+                    f"{indent}    {base} *data;",
+                    f"{indent}    size_t length;",
+                    f"{indent}}} {value_name}",
+                ]
+            return [f"{indent}{base} {value_name}{suffix}"]
+
+        optional = field.conditional or (field.lower == 0 and field.upper == 1)
+        if optional:
+            value_lines = value_declaration("value", "    ")
+            value_lines[-1] += ";"
+            return [
+                "struct {",
+                "    bool has_value;",
+                *value_lines,
+                f"}} {field_name}",
+            ]
+        return value_declaration(field_name)
 
     def _ordered_records(self):
         ordered = []
         visiting = set()
         visited = set()
-
-        def nested_records(record, path):
-            yield record, path
-            for child in record.nested:
-                yield from nested_records(child, path + (_identifier(child.name),))
-
-        def root_record(path):
-            while path[:-1] in self.records:
-                path = path[:-1]
-            return path
 
         def visit(path):
             if path in visited:
@@ -160,27 +192,23 @@ class _CRenderer:
                 raise HeaderError(
                     f"cyclic by-value or inheritance dependency involving {'::'.join(path)}")
             visiting.add(path)
-            namespace_path = path[:-1]
-            for record, owner_path in nested_records(self.records[path], path):
-                dependencies = list(record.bases)
-                for field in record.fields:
-                    dependencies.append(field.type_name)
-                    dependencies.extend(field.alternatives)
-                for name in dependencies:
-                    dependency = self._resolve_record(name, namespace_path, owner_path)
-                    if dependency == owner_path:
-                        raise HeaderError(f"{'::'.join(owner_path)} contains itself by value")
-                    if dependency is not None:
-                        dependency_root = root_record(dependency)
-                        if dependency_root != path:
-                            visit(dependency_root)
+            record = self.records[path]
+            dependencies = list(record.bases)
+            for field in record.fields:
+                dependencies.append(field.type_name)
+                dependencies.extend(field.alternatives)
+            for name in dependencies:
+                dependency = self._resolve_record(name, path[:-1], path)
+                if dependency == path:
+                    raise HeaderError(f"{'::'.join(path)} contains itself by value")
+                if dependency is not None:
+                    visit(dependency)
             visiting.remove(path)
             visited.add(path)
-            ordered.append((path, self.records[path]))
+            ordered.append((path, record))
 
         for path in self.records:
-            if path[:-1] not in self.records:
-                visit(path)
+            visit(path)
         return ordered
 
     def _guard(self):
@@ -200,15 +228,14 @@ class _CRenderer:
 
     def _render_record(self, record, path, namespace_path, lines):
         name = self._c_name(path)
-        for child in record.nested:
-            self._render_record(
-                child, path + (_identifier(child.name),), namespace_path, lines)
         lines.append(f"struct {name} {{")
         for base in record.bases:
             base_path = self._resolve_record(base, namespace_path, path)
             base_type = (f"struct {self._c_name(base_path)}" if base_path else
                          self._base_type(base, namespace_path, path))
             lines.append(f"    {base_type} base_{_identifier(base.split('::')[-1])};")
+        if not record.bases and not record.fields:
+            lines.append("    uint8_t typelink_empty;")
         for field in record.fields:
             declaration = self._declaration(field, path, namespace_path)
             lines.extend(
@@ -234,11 +261,15 @@ class _CRenderer:
             collection = (param.upper is None or param.lower != param.upper
                           or (param.upper is not None and param.upper > 1))
             if param.direction in ("out", "inout") or collection:
-                qualifier = "const " if param.direction == "in" else ""
-                parameters.append(
-                    f"{qualifier}{base} *{_identifier(param.name)}")
+                name = _identifier(param.name)
+                if base.endswith("*"):
+                    qualifier = "const " if param.direction == "in" else ""
+                    parameters.append(f"{qualifier}{base.rstrip()}*{name}")
+                else:
+                    qualifier = "const " if param.direction == "in" else ""
+                    parameters.append(f"{qualifier}{base} *{name}")
             elif param.type_name in ("ScalarValues::String", "str"):
-                parameters.append(f"const {base} {_identifier(param.name)}")
+                parameters.append(f"const char *{_identifier(param.name)}")
             elif not (_SCALARS.get(param.type_name, (None, False))[1]
                       or re.fullmatch(r"b[0-9]+", param.type_name) is not None):
                 parameters.append(f"const {base} *{_identifier(param.name)}")
@@ -274,11 +305,12 @@ class _CRenderer:
             "#include <stdint.h>",
             "",
         ]
-        for path, _record in self._ordered_records():
+        ordered = self._ordered_records()
+        for path, _record in ordered:
             lines.append(f"struct {self._c_name(path)};")
-        if self.records:
+        if ordered:
             lines.append("")
-        for path, record in self._ordered_records():
+        for path, record in ordered:
             self._render_record(record, path, path[:-1], lines)
 
         def functions(namespace, path=()):

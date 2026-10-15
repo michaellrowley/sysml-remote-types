@@ -13,7 +13,7 @@ def _schema_path(header_path, item, multiple):
     if multiple:
         suffix = re.sub(r"[^A-Za-z0-9_]+", "_", item).strip("_").lower()
         stem += "_" + (suffix or "item")
-    return header_path.with_name(stem).with_suffix(".ksy")
+    return header_path.with_name(stem + ".ksy")
 
 
 def register(subparsers):

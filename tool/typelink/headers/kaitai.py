@@ -125,15 +125,30 @@ def _base_size(type_value, types, stack):
             return None
         body = types[type_name]
         sequence = body.get("seq", []) if isinstance(body, dict) else []
-        total = 0
-        for entry in sequence:
-            _, bits, lower, upper, _ = _entry_shape(
-                entry, types, (*stack, type_name))
-            if bits is None or upper is None or lower != upper:
-                return None
-            total += bits * upper
-        return total
+        return _sequence_size(sequence, types, (*stack, type_name))
     return None
+
+
+def _is_byte_aligned(type_value):
+    if type_value is None:
+        return True
+    type_name = _plain_type(type_value)
+    if type_name is not None:
+        return not re.fullmatch(r"b[1-9][0-9]*", type_name)
+    alternatives = _type_alternatives(type_value)
+    return any(_is_byte_aligned(value) for value in alternatives)
+
+
+def _sequence_size(sequence, types, stack=()):
+    cursor = 0
+    for entry in sequence:
+        _, bits, lower, upper, _, _ = _entry_shape(entry, types, stack)
+        if _is_byte_aligned(entry.get("type")) and cursor % 8:
+            cursor += 8 - cursor % 8
+        if bits is None or upper is None or lower != upper:
+            return None
+        cursor += bits * upper
+    return cursor
 
 
 def _entry_shape(entry, types, stack=()):
@@ -149,24 +164,19 @@ def _entry_shape(entry, types, stack=()):
     if type_value is not None and type_name is None and not alternatives:
         raise HeaderError("unsupported Kaitai field type shape")
     if type_name is None and not alternatives:
-        if isinstance(size, int):
-            type_name = "u1"
-            lower = upper = size
-            return type_name, 8, lower, upper, alternatives
-        if size is not None:
-            return "u1", 8, 0, None, alternatives
-        type_name = "u1"
+        type_name = "bytes"
     lower, upper = _repeat_bounds(entry)
-    if "if" in entry:
-        lower, upper = 0, 1
+    conditional = "if" in entry
     if isinstance(size, int) and size >= 0:
-        bits = (size * 8 if type_name in ("str", "u1")
-                else _base_size(type_value, types, stack))
+        bits = size * 8 if type_name in ("str", "bytes") or type_name in types else (
+            _base_size(type_value, types, stack))
+    elif size is not None:
+        bits = None
     elif type_name == "str":
         bits = None
     else:
         bits = _base_size(type_value, types, stack)
-    return type_name or "choice", bits, lower, upper, alternatives
+    return type_name or "choice", bits, lower, upper, alternatives, conditional
 
 
 def _schema_fields(sequence, types, type_names, excluded=()):
@@ -174,8 +184,10 @@ def _schema_fields(sequence, types, type_names, excluded=()):
     cursor = 0
     excluded = set(excluded)
     for entry in sequence:
-        type_name, bits, lower, upper, alternatives = _entry_shape(entry, types)
+        type_name, bits, lower, upper, alternatives, conditional = _entry_shape(entry, types)
         identifier = entry["id"]
+        if cursor is not None and _is_byte_aligned(entry.get("type")) and cursor % 8:
+            cursor += 8 - cursor % 8
         field = Field(
             name=identifier,
             type_name=type_names.get(type_name, type_name),
@@ -184,11 +196,12 @@ def _schema_fields(sequence, types, type_names, excluded=()):
             bits=bits,
             offset_bits=cursor if cursor is not None else None,
             alternatives=[type_names.get(value, value) for value in alternatives],
+            conditional=conditional,
         )
         if identifier not in excluded:
             fields.append(field)
         if cursor is not None:
-            if bits is None or upper is None or lower != upper:
+            if conditional or bits is None or upper is None or lower != upper:
                 cursor = None
             else:
                 cursor += bits * upper
@@ -206,7 +219,11 @@ def _qualified_path(name, namespace_path, records):
     if name.startswith("::"):
         parts = tuple(name[2:].split("::"))
         return parts if parts in records else None
-    for candidate in (namespace_path + parts, parts):
+    candidates = [
+        namespace_path[:depth] + parts
+        for depth in range(len(namespace_path), -1, -1)
+    ]
+    for candidate in candidates:
         if candidate in records:
             return candidate
     return None
@@ -262,18 +279,39 @@ def apply(module, schemas):
                 for child in item.nested:
                     child_path = nested_path + (child.name,)
                     alias = _identifier("__".join((root_record.name, *child_path)))
-                    aliases[alias] = child
+                    aliases[alias] = (child_path, child)
                     visit(child, child_path)
 
             visit(root_record)
             return aliases
 
         aliases = nested_aliases(record)
+        normalized_records = {
+            tuple(_identifier(part) for part in record_path): (record_path, item)
+            for record_path, item in module_records.items()
+        }
+        external_prefix = f"{document['meta'].get('id', '')}__external__"
+        helpers = []
         for type_id in types:
-            nested = aliases.get(_identifier(type_id))
-            helper = nested or Record(_helper_name(type_id))
-            type_records[type_id] = helper
-            type_names[type_id] = helper.name
+            normalized_id = _identifier(type_id)
+            nested = aliases.get(normalized_id)
+            external = None
+            if external_prefix != "__external__" and type_id.startswith(external_prefix):
+                external_path = type_id[len(external_prefix):].split("__")
+                external = normalized_records.get(
+                    tuple(_identifier(part) for part in external_path))
+            if nested is not None:
+                nested_path, type_record = nested
+                type_name = "::".join(nested_path)
+            elif external is not None:
+                external_path, type_record = external
+                type_name = "::" + "::".join(external_path)
+            else:
+                type_record = Record(_helper_name(type_id))
+                type_name = type_record.name
+                helpers.append(type_record)
+            type_records[type_id] = type_record
+            type_names[type_id] = type_name
 
         for type_id, type_record in type_records.items():
             type_body = types[type_id]
@@ -284,8 +322,7 @@ def apply(module, schemas):
                 raise HeaderError(f"Kaitai type {type_id!r} has an invalid sequence")
             type_record.fields, type_record.bits = _schema_fields(
                 type_sequence, types, type_names)
-            type_record.nested = []
-        record.nested = list(type_records.values())
+        record.nested.extend(helpers)
 
         excluded = set()
         namespace_path = path[:-1]

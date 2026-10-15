@@ -51,6 +51,7 @@ class _Item:
     signed_instances: List[Tuple[str, str]] = field(default_factory=list)
     generated_ids: Set[str] = field(default_factory=set)
     message_type_id: Optional[str] = None
+    external_path: Optional[Tuple[str, ...]] = None
 
 
 def _unquote(value):
@@ -278,7 +279,9 @@ def _resolved_item(item, items, stack=()):
     for child in item.children:
         children.append(_resolved_item(child, items, (*stack, item)))
     fields.extend(item.fields)
-    return _Item(item.name, item.layout, item.bits, fields, [], children)
+    return _Item(
+        item.name, item.layout, item.bits, fields, [], children,
+        external_path=item.external_path)
 
 
 def _assign_ids(root):
@@ -287,8 +290,13 @@ def _assign_ids(root):
     names = {}
 
     def assign(item, parts):
-        item.ksy_id = root.ksy_id if item is root else _identifier(
-            "__".join((root.name, *parts)))
+        if item is root:
+            item.ksy_id = root.ksy_id
+        elif item.external_path is not None:
+            item.ksy_id = _identifier("__".join(
+                (root.name, "external", *item.external_path)))
+        else:
+            item.ksy_id = _identifier("__".join((root.name, *parts)))
         if item.ksy_id in names and names[item.ksy_id] is not item:
             raise KaitaiError(f"item names collide after Kaitai normalization: {item.name!r}")
         names[item.ksy_id] = item
@@ -861,29 +869,38 @@ def _root_item(text, name):
     for context in contexts:
         if sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is None:
             _item_from_context(context, context_items=context_items)
+
+    def qualified_name(context):
+        packages = []
+        parent = context.parentCtx
+        while parent is not None:
+            if isinstance(parent, P.PackageContext):
+                package = parent.packageDeclaration()
+                if package is not None and package.identification() is not None:
+                    packages.append(_unquote(sysml.decl_name(package)))
+            parent = parent.parentCtx
+        declaration = sysml.find_first(context, P.DefinitionDeclarationContext)
+        item_name = _unquote(sysml.decl_name(declaration))
+        return "::".join(list(reversed(packages)) + [item_name])
+
     if name is not None:
         selector = _unquote(name)
-
-        def qualified_name(context):
-            packages = []
-            parent = context.parentCtx
-            while parent is not None:
-                if isinstance(parent, P.PackageContext):
-                    package = parent.packageDeclaration()
-                    if package is not None and package.identification() is not None:
-                        packages.append(_unquote(sysml.decl_name(package)))
-                parent = parent.parentCtx
-            declaration = sysml.find_first(context, P.DefinitionDeclarationContext)
-            item_name = _unquote(sysml.decl_name(declaration))
-            return "::".join(list(reversed(packages)) + [item_name])
-
-        matches = [
+        root_only = selector.startswith("::")
+        if root_only:
+            selector = selector[2:]
+        top_level = [
             context for context in contexts
-            if _unquote(sysml.decl_name(
-                sysml.find_first(context, P.DefinitionDeclarationContext))) == selector
-            or (sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is None
-                and qualified_name(context) == selector)
+            if sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is None
         ]
+        matches = (
+            [context for context in top_level if qualified_name(context) == selector]
+            if root_only else [
+                context for context in contexts
+                if _unquote(sysml.decl_name(
+                    sysml.find_first(context, P.DefinitionDeclarationContext))) == selector
+                or (context in top_level and qualified_name(context) == selector)
+            ]
+        )
         if not matches:
             raise KaitaiError(f"no item definition named {name!r} found")
         if len(matches) > 1:
@@ -896,13 +913,48 @@ def _root_item(text, name):
                 "select one top-level item with --item; "
                 f"found {len(top)} top-level item definitions")
         selected = top[0]
-    if selected not in context_items:
-        selected_item = _item_from_context(selected)
-        model_items = list(_all_items(selected_item))
-    else:
-        selected_item = context_items[selected]
-        model_items = [item for item in context_items.values()]
-    return tree, _resolved_item(selected_item, model_items)
+    selected_item = context_items[selected]
+    model_items = list(context_items.values())
+    root = _resolved_item(selected_item, model_items)
+    top_level_items = []
+    for context in contexts:
+        if sysml.ancestor(context.parentCtx, P.ItemDefinitionContext) is not None:
+            continue
+        top_level_items.append((qualified_name(context), context_items[context]))
+
+    queue = [root]
+    attached = set()
+    while queue:
+        owner = queue.pop(0)
+        for member in owner.fields:
+            target = _unquote(member.type_name)
+            if _find_item(list(_all_items(root)), target, owner) is not None:
+                continue
+            target_name = target.split("::")[-1]
+            candidates = [
+                (path, candidate) for path, candidate in top_level_items
+                if candidate.name == target_name and candidate is not selected_item
+                and (target.count("::") == 0 or path == target)
+            ]
+            if len(candidates) > 1:
+                raise KaitaiError(f"type {target!r} is ambiguous")
+            if not candidates:
+                continue
+            source_path, candidate = candidates[0]
+            if source_path in attached:
+                continue
+            external = _resolved_item(candidate, model_items)
+
+            def mark_external(item, path):
+                item.external_path = path
+                for child in item.children:
+                    mark_external(child, (*path, child.name))
+
+            mark_external(external, tuple(source_path.split("::")))
+            root.children.append(external)
+            attached.add(source_path)
+            queue.append(external)
+    return tree, root
 
 
 def generate(text, item=None, endian="le", bit_endian="le",

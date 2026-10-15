@@ -189,6 +189,8 @@ def _action(context, source):
         if action_body_item is None or action_body_item.parentCtx is not body:
             continue
         wrapper = sysml.ancestor(usage, (P.ItemUsageContext, P.AttributeUsageContext))
+        if wrapper is None:
+            continue
         prefix = sysml.find_first(wrapper, P.FeatureDirectionContext)
         direction = prefix.getText() if prefix is not None else "in"
         parameter = _field_from_usage(usage, direction)
