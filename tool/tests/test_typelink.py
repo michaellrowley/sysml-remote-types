@@ -14,7 +14,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from typelink import (
-    commands as cli_commands, emit, fetch, kaitai, languages, parser, repository,
+    commands as cli_commands, emit, fetch, headers, kaitai, languages, parser,
+    repository,
     spec, sysml, update,
 )  # noqa: E402
 from typelink.__main__ import build_parser, main  # noqa: E402
@@ -373,7 +374,11 @@ class HeaderResolverTests(unittest.TestCase):
             }
         }
         item def Packet specializes Header {
+            item def Payload {
+                attribute code : ScalarValues::Integer;
+            }
             item header : Header;
+            item body : Payload;
             attribute payload : ScalarValues::Integer[4];
         }
         action def Parse {
@@ -397,8 +402,8 @@ class HeaderResolverTests(unittest.TestCase):
              header.fields[0].offset_bits),
             ("kind", 8, 0))
         self.assertEqual(packet.bases, ["Header"])
-        self.assertEqual(packet.fields[1].lower, 4)
-        self.assertEqual(packet.nested, [])
+        self.assertEqual(packet.fields[2].lower, 4)
+        self.assertEqual(packet.nested[0].name, "Payload")
         self.assertEqual(
             [(parameter.name, parameter.direction)
              for parameter in action.parameters],
@@ -410,6 +415,74 @@ class HeaderResolverTests(unittest.TestCase):
             resolve_header(
                 "item def Packet { attribute value : ScalarValues::Integer "
                 "{ @DataSize { bits = -1; } } }")
+
+
+class HeaderGenerationTests(unittest.TestCase):
+    MODEL = '''package Demo {
+    package Wire {
+        item def Packet specializes Header {
+            item def Payload {
+                attribute code : ScalarValues::Integer;
+            }
+            item body : Payload;
+            attribute values : ScalarValues::Integer[4] {
+                @DataSize { bits = 8; }
+                @DataOffset { bits = 16; }
+            }
+            attribute maybe : ScalarValues::Boolean[0..1];
+            attribute rest : ScalarValues::String[0..*];
+        }
+        item def Header {
+            @DataSize { bits = 16; }
+            attribute kind : ScalarValues::Integer {
+                @DataSize { bits = 8; }
+                @DataOffset { bits = 0; }
+            }
+        }
+        action def Parse {
+            in item packet : Packet;
+            out item result : Packet;
+            first start;
+            then validate;
+        }
+    }
+}'''
+
+    def test_cpp_backend_emits_structs_layout_constants_and_action_stubs(self):
+        output = headers.generate(self.MODEL)
+
+        self.assertIn("#include <array>", output)
+        self.assertIn("struct Packet : public Header", output)
+        self.assertIn("std::array<std::int64_t, 4> values{}", output)
+        self.assertIn("std::optional<bool> maybe{}", output)
+        self.assertIn("std::vector<std::string> rest{}", output)
+        self.assertIn("struct Payload {", output)
+        self.assertIn("struct kaitai_layout : Header::kaitai_layout", output)
+        self.assertIn("static constexpr std::size_t kind_offset_bits = 0;", output)
+        self.assertIn("static constexpr std::size_t values_size_bits = 8;", output)
+        self.assertIn("Packet Parse(const Packet& packet)", output)
+        self.assertIn("// TODO: implement SysML action connection: then validate;", output)
+        self.assertIn('throw std::logic_error("TODO: implement Parse");', output)
+        self.assertLess(output.index("struct Header {"), output.index("struct Packet :"))
+
+    def test_cpp_header_compiles(self):
+        compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("C++ compiler is not installed")
+        output = headers.generate(self.MODEL)
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.hpp"
+            source = Path(temp) / "check.cpp"
+            header.write_text(output)
+            source.write_text('#include "generated.hpp"\nint main() { Demo::Wire::Packet p; }\n')
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rejects_unregistered_backend(self):
+        with self.assertRaisesRegex(headers.HeaderError, "unsupported header language"):
+            headers.generate("item def Packet { }", language="c")
 
 
 class KaitaiTests(unittest.TestCase):
@@ -861,7 +934,30 @@ class CliTests(unittest.TestCase):
             if isinstance(action, argparse._SubParsersAction))
         self.assertEqual(
             set(subparsers.choices),
-            {"check", "expand", "kaitai", "sync-spec", "update"})
+            {"check", "expand", "header", "kaitai", "sync-spec", "update"})
+
+    def test_header_command_writes_single_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "model.sysml"
+            output = Path(temp) / "model.hpp"
+            source.write_text(
+                "package Demo { item def Packet { "
+                "attribute kind : ScalarValues::Integer; } }")
+
+            self.assertEqual(main(["header", str(source), "-o", str(output)]), 0)
+            self.assertIn("namespace Demo {", output.read_text())
+            self.assertIn("struct Packet {", output.read_text())
+
+    def test_header_command_mirrors_directory_tree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source_dir = Path(temp) / "models"
+            nested = source_dir / "nested"
+            nested.mkdir(parents=True)
+            (nested / "packet.sysml").write_text("item def Packet { }")
+            output_dir = Path(temp) / "headers"
+
+            self.assertEqual(main(["header", str(source_dir), "-o", str(output_dir)]), 0)
+            self.assertTrue((output_dir / "nested" / "packet.hpp").exists())
 
     def test_new_command_package_needs_no_dispatcher_change(self):
         module_name = f"{cli_commands.__name__}.future_command"
