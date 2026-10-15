@@ -422,15 +422,19 @@ class HeaderGenerationTests(unittest.TestCase):
     package Wire {
         item def Packet specializes Header {
             item def Payload {
-                attribute code : ScalarValues::Integer;
+                @DataSize { bits = 8; }
+                attribute code : ScalarValues::Integer {
+                    @DataSize { bits = 8; }
+                }
             }
             item body : Payload;
             attribute values : ScalarValues::Integer[4] {
                 @DataSize { bits = 8; }
                 @DataOffset { bits = 16; }
             }
-            attribute maybe : ScalarValues::Boolean[0..1];
-            attribute rest : ScalarValues::String[0..*];
+            attribute rest : ScalarValues::Integer[0..*] {
+                @DataSize { bits = 8; }
+            }
         }
         item def Header {
             @DataSize { bits = 16; }
@@ -454,9 +458,8 @@ class HeaderGenerationTests(unittest.TestCase):
         self.assertIn("namespace Demo::Wire {", output)
         self.assertIn("#include <array>", output)
         self.assertIn("struct Packet : public Header", output)
-        self.assertIn("std::array<std::int64_t, 4> values{}", output)
-        self.assertIn("std::optional<bool> maybe{}", output)
-        self.assertIn("std::vector<std::string> rest{}", output)
+        self.assertIn("std::array<std::uint8_t, 4> values{}", output)
+        self.assertIn("std::vector<std::uint8_t> rest{}", output)
         self.assertIn("struct Payload {", output)
         self.assertIn("struct kaitai_layout : Header::kaitai_layout", output)
         self.assertIn("static constexpr std::size_t kind_offset_bits = 0;", output)
@@ -485,6 +488,10 @@ class HeaderGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(headers.HeaderError, "unsupported header language"):
             headers.generate("item def Packet { }", language="rust")
 
+    def test_empty_record_does_not_require_a_kaitai_sequence(self):
+        output = headers.generate("item def Empty { }")
+        self.assertIn("struct Empty {", output)
+
     def test_c_backend_flattens_namespaces_and_represents_inheritance(self):
         output = headers.generate(self.MODEL, language="c")
         other = headers.generate("item def Other { }", language="c")
@@ -494,10 +501,9 @@ class HeaderGenerationTests(unittest.TestCase):
         self.assertIn("struct Demo_Wire_Header {", output)
         self.assertIn("struct Demo_Wire_Packet {", output)
         self.assertIn("struct Demo_Wire_Header base_Header;", output)
-        self.assertIn("int64_t values[4];", output)
-        self.assertIn(
-            "struct {\n        bool has_value;\n        bool value;\n    } maybe;",
-            output)
+        self.assertIn("uint8_t values[4];", output)
+        self.assertIn("struct {", output)
+        self.assertIn("size_t length;", output)
         self.assertIn("#define DEMO_WIRE_HEADER_KAITAI_SIZE_BITS 16", output)
         self.assertIn(
             "/* TODO: implement SysML action connection: then validate; */", output)
@@ -519,6 +525,116 @@ class HeaderGenerationTests(unittest.TestCase):
                 [compiler, "-std=c11", "-fsyntax-only", str(source)],
                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_record_fields_come_from_ksy_but_model_relationships_remain(self):
+        model = '''package Demo {
+    item def Base {
+        attribute declared : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    item def Packet specializes Base {
+        attribute model_only : ScalarValues::Integer { @DataSize { bits = 8; } }
+    }
+    action def Decode {
+        in item packet : Packet;
+        first start;
+        then parse;
+    }
+}'''
+        schemas = [
+            ("Demo::Base", '''meta:
+  id: base
+seq:
+  - id: declared
+    type: u1
+'''),
+            ("Demo::Packet", '''meta:
+  id: packet
+seq:
+  - id: declared
+    type: u1
+  - id: wire_value
+    type: u2
+  - id: label
+    type: str
+    size: 4
+  - id: flags
+    type: b3
+  - id: optional_value
+    type: u1
+    if: flags != 0
+  - id: choice
+    type:
+      switch-on: flags
+      cases:
+        0: u1
+        1: u4
+  - id: remainder
+    type: u1
+    repeat: eos
+'''),
+        ]
+
+        cpp = headers.generate(model, schemas=schemas)
+        c = headers.generate(model, language="c", schemas=schemas)
+        self.assertIn("struct Packet : public Base", cpp)
+        self.assertIn("std::uint16_t wire_value{}", cpp)
+        self.assertIn("std::array<char, 4> label{}", cpp)
+        self.assertIn("std::optional<std::uint8_t> optional_value{}", cpp)
+        self.assertIn("std::variant<std::uint8_t, std::uint32_t> choice{}", cpp)
+        self.assertIn("std::vector<std::uint8_t> remainder{}", cpp)
+        self.assertNotIn("model_only", cpp)
+        packet_body = cpp.split("struct Packet : public Base {", 1)[1].split("};", 1)[0]
+        self.assertNotIn("declared", packet_body)
+        self.assertIn("static inline void Demo_Decode", c)
+        self.assertIn("uint16_t wire_value;", c)
+        self.assertIn("char label[4];", c)
+        self.assertIn("union {", c)
+        self.assertNotIn("model_only", c)
+        compiler = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+        if compiler:
+            with tempfile.TemporaryDirectory() as temp:
+                header = Path(temp) / "generated.h"
+                source = Path(temp) / "check.c"
+                header.write_text(c)
+                source.write_text(
+                    '#include "generated.h"\nint main(void) { return 0; }\n')
+                result = subprocess.run(
+                    [compiler, "-std=c11", "-fsyntax-only", str(source)],
+                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_cpp_generated_from_ksy_compiles(self):
+        compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
+        if not compiler:
+            self.skipTest("C++ compiler is not installed")
+        model = "item def Packet { attribute value : ScalarValues::Integer; }"
+        schema = '''meta:
+  id: packet
+seq:
+  - id: value
+    type: u2
+'''
+        output = headers.generate(model, schemas=[("Packet", schema)])
+        with tempfile.TemporaryDirectory() as temp:
+            header = Path(temp) / "generated.hpp"
+            source = Path(temp) / "check.cpp"
+            header.write_text(output)
+            source.write_text('#include "generated.hpp"\nint main() { Packet p; }\n')
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", str(source)],
+                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rejects_unsupported_ksy_shape(self):
+        model = "item def Packet { }"
+        for sequence, message in (
+            ("  - id: value\n    type: u1\n    repeat: invalid\n", "repeat mode"),
+            ("  - id: value\n    type: b128\n", "exceeds 64 bits"),
+        ):
+            with self.subTest(sequence=sequence):
+                with self.assertRaisesRegex(headers.HeaderError, message):
+                    schema = f"meta:\n  id: packet\nseq:\n{sequence}"
+                    headers.generate(model, schemas=[("Packet", schema)])
 
 
 class KaitaiTests(unittest.TestCase):
@@ -1056,11 +1172,14 @@ package Second {
         with tempfile.TemporaryDirectory() as temp:
             source = Path(temp) / "model.sysml"
             output = Path(temp) / "model.hpp"
-            source.write_text("item def Packet { }")
+            source.write_text(
+                "item def Packet { attribute kind : ScalarValues::Integer "
+                "{ @DataSize { bits = 8; } } }")
 
             self.assertEqual(
                 main(["header", str(source), "-o", str(output), "--skip-kaitai"]), 0)
             self.assertTrue(output.exists())
+            self.assertIn("std::uint8_t kind{}", output.read_text())
             self.assertFalse((Path(temp) / "model.ksy").exists())
 
     def test_new_command_package_needs_no_dispatcher_change(self):

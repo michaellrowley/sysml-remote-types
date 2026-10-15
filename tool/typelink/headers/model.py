@@ -13,6 +13,7 @@ class Field:
     direction: str = "in"
     bits: Optional[int] = None
     offset_bits: Optional[int] = None
+    alternatives: List[str] = field(default_factory=list)
 
 
 @dataclass

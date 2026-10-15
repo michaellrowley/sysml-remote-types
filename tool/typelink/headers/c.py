@@ -10,6 +10,18 @@ _SCALARS = {
     "ScalarValues::Real": ("double", True),
     "ScalarValues::Boolean": ("bool", True),
     "ScalarValues::String": ("char *", False),
+    "u1": ("uint8_t", True),
+    "u2": ("uint16_t", True),
+    "u4": ("uint32_t", True),
+    "u8": ("uint64_t", True),
+    "s1": ("int8_t", True),
+    "s2": ("int16_t", True),
+    "s4": ("int32_t", True),
+    "s8": ("int64_t", True),
+    "f4": ("float", True),
+    "f8": ("double", True),
+    "str": ("char *", False),
+    "bytes": ("uint8_t", True),
 }
 
 
@@ -59,6 +71,10 @@ class _CRenderer:
         scalar = _SCALARS.get(type_name)
         if scalar:
             return scalar[0]
+        if type_name.startswith("b") and type_name[1:].isdigit():
+            width = int(type_name[1:])
+            size = next((size for size in (8, 16, 32, 64) if width <= size), 64)
+            return f"uint{size}_t"
         path = self._resolve_record(type_name, namespace_path, owner_path)
         if path is None:
             return f"struct {self._c_name(tuple(_identifier(part) for part in
@@ -67,7 +83,37 @@ class _CRenderer:
 
     def _declaration(self, field, owner_path, namespace_path, name=None):
         field_name = _identifier(name or field.name)
+        if field.alternatives:
+            alternatives = [
+                f"{self._base_type(alt, namespace_path, owner_path)} case_{index};"
+                for index, alt in enumerate(field.alternatives)
+            ]
+            return ["union {", *(f"    {alternative}" for alternative in alternatives),
+                    f"}} {field_name}"]
+        if field.type_name == "str" and field.bits is not None:
+            size = field.bits // 8
+            if size == 0:
+                raise HeaderError(
+                    f"{field.name}: C cannot represent an empty fixed string")
+            if field.upper is not None and field.lower == field.upper:
+                if field.lower == 0:
+                    raise HeaderError(
+                        f"{field.name}: C cannot represent a zero-length array")
+                return [f"char {field_name}[{field.lower}][{size}]"] \
+                    if field.lower != 1 else [f"char {field_name}[{size}]"]
+            if field.lower == 0 and field.upper == 1:
+                return (
+                    ["struct {", "    bool has_value;", f"    char value[{size}];",
+                     f"}} {field_name}"])
+            if field.upper is None or field.lower != field.upper:
+                return (
+                    ["struct {", f"    char (*data)[{size}];", "    size_t length;",
+                     f"}} {field_name}"])
+            return [f"char {field_name}[{size}]"]
         base = self._base_type(field.type_name, namespace_path, owner_path)
+        if field.type_name == "bytes" and field.bits is not None:
+            count = field.bits // 8
+            return [f"uint8_t {field_name}[{count}]"]
         if field.upper is not None and field.lower == field.upper and field.lower != 1:
             return [f"{base} {field_name}[{field.lower}]"]
         if field.lower == 0 and field.upper == 1:
@@ -105,7 +151,9 @@ class _CRenderer:
             namespace_path = path[:-1]
             for record, owner_path in nested_records(self.records[path], path):
                 dependencies = list(record.bases)
-                dependencies.extend(field.type_name for field in record.fields)
+                for field in record.fields:
+                    dependencies.append(field.type_name)
+                    dependencies.extend(field.alternatives)
                 for name in dependencies:
                     dependency = self._resolve_record(name, namespace_path, owner_path)
                     if dependency == owner_path:

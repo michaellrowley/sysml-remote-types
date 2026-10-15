@@ -24,6 +24,18 @@ _SCALARS = {
     "ScalarValues::Real": "double",
     "ScalarValues::Boolean": "bool",
     "ScalarValues::String": "std::string",
+    "u1": "std::uint8_t",
+    "u2": "std::uint16_t",
+    "u4": "std::uint32_t",
+    "u8": "std::uint64_t",
+    "s1": "std::int8_t",
+    "s2": "std::int16_t",
+    "s4": "std::int32_t",
+    "s8": "std::int64_t",
+    "f4": "float",
+    "f8": "double",
+    "str": "std::string",
+    "bytes": "std::uint8_t",
 }
 
 
@@ -90,18 +102,20 @@ class _CppRenderer:
         return None
 
     def _type(self, type_name, field, namespace_path, owner_path):
-        scalar = _SCALARS.get(type_name)
-        if scalar is None:
-            resolved = self._resolve_record(type_name, namespace_path, owner_path)
-            if resolved is not None:
-                if resolved[:len(owner_path)] == owner_path:
-                    scalar = "::".join(resolved[len(owner_path):])
-                elif resolved[:len(namespace_path)] == namespace_path:
-                    scalar = "::".join(resolved[len(namespace_path):])
-                else:
-                    scalar = "::" + "::".join(resolved)
-            else:
-                scalar = "::".join(_path(type_name))
+        if type_name == "str" and field.bits is not None:
+            scalar = f"std::array<char, {field.bits // 8}>"
+        elif field.alternatives:
+            alternatives = [
+                self._type_name(value, namespace_path, owner_path)
+                for value in field.alternatives
+            ]
+            scalar = f"std::variant<{', '.join(alternatives)}>"
+        else:
+            scalar = self._type_name(type_name, namespace_path, owner_path)
+        if type_name.startswith("b") and type_name[1:].isdigit():
+            width = int(type_name[1:])
+            storage = next((size for size in (8, 16, 32, 64) if width <= size), 64)
+            scalar = f"std::uint{storage}_t"
         if (field.upper is not None and field.lower == field.upper
                 and field.lower != 1):
             scalar = f"std::array<{scalar}, {field.lower}>"
@@ -110,6 +124,19 @@ class _CppRenderer:
         elif field.upper is None or field.lower != field.upper:
             scalar = f"std::vector<{scalar}>"
         return scalar
+
+    def _type_name(self, type_name, namespace_path, owner_path):
+        scalar = _SCALARS.get(type_name)
+        if scalar is not None:
+            return scalar
+        resolved = self._resolve_record(type_name, namespace_path, owner_path)
+        if resolved is not None:
+            if resolved[:len(owner_path)] == owner_path:
+                return "::".join(resolved[len(owner_path):])
+            if resolved[:len(namespace_path)] == namespace_path:
+                return "::".join(resolved[len(namespace_path):])
+            return "::" + "::".join(resolved)
+        return "::".join(_path(type_name))
 
     def _base(self, value, namespace_path, owner_path):
         resolved = self._resolve_record(value, namespace_path, owner_path)
@@ -151,14 +178,16 @@ class _CppRenderer:
                         if dependency_root != path:
                             visit(dependency_root)
                 for field in member.fields:
-                    dependency = self._resolve_record(field.type_name, namespace_path, owner_path)
-                    if dependency == owner_path:
-                        raise HeaderError(
-                            f"{'::'.join(owner_path)} contains itself by value")
-                    if dependency is not None:
-                        dependency_root = root_record(dependency)
-                        if dependency_root != path:
-                            visit(dependency_root)
+                    for type_name in (field.type_name, *field.alternatives):
+                        dependency = self._resolve_record(
+                            type_name, namespace_path, owner_path)
+                        if dependency == owner_path:
+                            raise HeaderError(
+                                f"{'::'.join(owner_path)} contains itself by value")
+                        if dependency is not None:
+                            dependency_root = root_record(dependency)
+                            if dependency_root != path:
+                                visit(dependency_root)
             visiting.remove(path)
             visited.add(path)
             ordered.append((path, record))
@@ -265,6 +294,7 @@ class _CppRenderer:
             "#include <optional>",
             "#include <stdexcept>",
             "#include <string>",
+            "#include <variant>",
             "#include <vector>",
             "",
         ]

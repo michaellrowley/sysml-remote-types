@@ -4,28 +4,8 @@ import sys
 from pathlib import Path
 
 from ... import emit, fetch, headers, kaitai, parser, sysml
+from ...headers.kaitai import item_selectors
 from .._files import targets
-
-
-def _top_level_items(text):
-    tree = sysml.parse(text)
-    items = []
-    for context in sysml.find_all(tree, sysml.P.ItemDefinitionContext):
-        if sysml.ancestor(context.parentCtx, sysml.P.ItemDefinitionContext) is not None:
-            continue
-        declaration = sysml.find_first(context, sysml.P.DefinitionDeclarationContext)
-        name = sysml.decl_name(declaration)
-        packages = []
-        parent = context.parentCtx
-        while parent is not None:
-            if isinstance(parent, sysml.P.PackageContext):
-                package = parent.packageDeclaration()
-                if package and package.identification():
-                    packages.append(sysml.decl_name(package))
-            parent = parent.parentCtx
-        selector = "::".join(list(reversed(packages)) + [name])
-        items.append(selector)
-    return items
 
 
 def _schema_path(header_path, item, multiple):
@@ -51,7 +31,7 @@ def register(subparsers):
         help="skip @TypeLink resolution for already-expanded SysML input")
     command.add_argument(
         "--skip-kaitai", action="store_true",
-        help="disable the default Kaitai schema generation stage")
+        help="do not write .ksy sidecars (schemas are still used for header fields)")
     command.add_argument(
         "--max-bytes", type=int, default=fetch.DEFAULT_MAX_BYTES,
         help="refuse linked resources larger than this (default: %(default)s)")
@@ -82,17 +62,16 @@ def run(args):
             )
             if not directory and args.output:
                 header_path = Path(args.output)
-            schemas = []
+            schemas = headers.generate_schemas(text)
+            multiple_items = len(item_selectors(text)) > 1
+            output = headers.generate(
+                text, language=args.language, schemas=schemas)
             if not args.skip_kaitai:
-                items = _top_level_items(text)
-                for item in items:
-                    schemas.append((
-                        _schema_path(header_path, item, len(items) > 1),
-                        kaitai.generate(text, item=item)))
-            output = headers.generate(text, language=args.language)
-            for schema_path, schema in schemas:
-                schema_path.parent.mkdir(parents=True, exist_ok=True)
-                schema_path.write_text(schema)
+                for item, schema in schemas:
+                    schema_path = _schema_path(
+                        header_path, item, multiple_items)
+                    schema_path.parent.mkdir(parents=True, exist_ok=True)
+                    schema_path.write_text(schema)
             if output_dir:
                 header_path.parent.mkdir(parents=True, exist_ok=True)
                 header_path.write_text(output)
