@@ -219,9 +219,10 @@ optional, and unbounded multiplicities represented by `std::array`,
 types, and package nesting becomes C++ namespaces. The `c` backend emits C11:
 it flattens package/type names into C identifiers, models inheritance through
 an embedded base member, and uses C arrays or pointer/length members for
-multiplicities. The header generator resolves a language-neutral declaration
-model before calling a backend, so additional output languages can be
-registered without coupling their renderers to SysML parsing.
+multiplicities; optional values use a `has_value`/`value` wrapper. The header
+generator resolves a language-neutral declaration model before calling a
+backend, so additional output languages can be registered without coupling
+their renderers to SysML parsing.
 
 Generated C++ classes contain a nested `kaitai_layout` descriptor with
 `static constexpr` size and field offset/width values wherever the SysML
@@ -231,11 +232,11 @@ The C backend emits equivalent compile-time preprocessor constants. These
 values describe the Kaitai schema layout; they are not an in-memory
 serialization or Kaitai runtime parser.
 
-Action `in` parameters become function inputs. A single `out` parameter
-becomes the function return value; other output parameters are references.
-Generated function bodies throw until implemented and include `TODO`
-annotations for SysML action succession connections. These connection
-annotations intentionally do not implement execution order or runtime
+Action `in` parameters become function inputs. In C++, a single `out`
+parameter becomes the function return value and other outputs are references.
+In C, output and `inout` parameters are pointers. Generated function bodies
+are stubs and include `TODO` annotations for SysML action succession
+connections; they intentionally do not implement execution order or runtime
 behavior.
 
 Pass a directory to process `.sysml` files recursively. Headers are written
