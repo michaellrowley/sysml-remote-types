@@ -1,4 +1,4 @@
-"""Language-neutral model for generated source headers."""
+"""Language-neutral model for generated source declarations."""
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -28,8 +28,15 @@ class Record:
 
 
 @dataclass
+class Enumeration:
+    """A SysML enumeration and its ordered values."""
+    name: str
+    values: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Function:
-    """A behavior translated to a generated function stub."""
+    """A behavior translated to a generated operation declaration."""
     name: str
     parameters: List[Field] = field(default_factory=list)
     connections: List[str] = field(default_factory=list)
@@ -42,6 +49,7 @@ class Namespace:
     namespaces: List["Namespace"] = field(default_factory=list)
     records: List[Record] = field(default_factory=list)
     functions: List[Function] = field(default_factory=list)
+    enumerations: List[Enumeration] = field(default_factory=list)
 
 
 @dataclass

@@ -1,11 +1,11 @@
-"""Language-neutral source-header generation and backend registry."""
+"""Language-neutral source-declaration generation and backend registry."""
 from importlib import import_module
 
 from .. import kaitai as kaitai_generator
 from .kaitai import _records, apply as apply_kaitai, item_selectors
 from .sysml import HeaderError, resolve
 
-_BACKENDS = {"c": "c", "cpp": "cpp"}
+_BACKENDS = {"c": "c", "cpp": "cpp", "rust": "rust"}
 
 
 def languages():

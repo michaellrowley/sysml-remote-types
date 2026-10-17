@@ -130,7 +130,7 @@ flowchart LR
     HEADER --> HEADER_RESOLVE["Resolve SysML namespaces and behavior"]
     HEADER_RESOLVE --> HEADER_KSY["Generate Kaitai schemas"]
     HEADER_KSY --> HEADER_IR["KSY-backed header model"]
-    HEADER_IR --> CPP["C++ / C backend"]
+    HEADER_IR --> CPP["C++ / C / Rust-Verus backend"]
     CPP --> HPP["Generated header"]
 
     SYNC --> SPEC["Canonical spec files"]
@@ -201,16 +201,17 @@ For other import settings, run `typelink expand` first (for example,
 `typelink expand model.sysml --data-model MODEL -o expanded.sysml`), then
 generate from the resulting SysMLv2 with `typelink kaitai --expanded`.
 
-## Generate source headers
+## Generate source headers and Rust modules
 
-`typelink header` translates SysML item definitions into C++ structs and
-translates `action def` behaviors into function stubs in their package
-namespaces. It resolves `@TypeLink` annotations by default; pass `--expanded`
-for a model that was expanded separately:
+`typelink header` translates SysML item definitions and `action def` behaviors
+into declarations for the selected language backend. It resolves `@TypeLink`
+annotations by default; pass `--expanded` for a model that was expanded
+separately:
 
 ```sh
 typelink header examples/packet.sysml -o packet.hpp --expanded
 typelink header model.sysml --language c -o model.h
+typelink header model.sysml --language rust -o model.rs
 typelink header model.sysml --declarations-only -o model.hpp
 ```
 
@@ -228,39 +229,52 @@ header generator resolves a language-neutral declaration model before calling
 a backend, so additional output languages can be registered without coupling
 their renderers to SysML parsing.
 
+The `rust` backend emits a Verus-compatible `verus!` module containing Rust
+item structs, symbolic enums, and action-signature traits. Enum values do not
+receive an implicit numeric representation. Fixed-width fields follow the
+Kaitai schema and retain bit-layout constants; Rust package names become
+modules, and fixed, optional, and unbounded multiplicities use arrays,
+`Option`, and `alloc` collections. A `no_std` consumer must expose the `alloc`
+crate when generated fields need heap-backed strings or collections. Rust
+action traits are declarations only; executable behavior and its contracts
+belong to the middleware layer.
+
 Generated C++ classes contain a nested `kaitai_layout` descriptor with
 `static constexpr` size and field offset/width values derived from the
 generated Kaitai schema. Descriptors inherit metadata from generated base
-classes. The C backend emits equivalent compile-time preprocessor constants.
+classes. The C backend emits equivalent compile-time preprocessor constants,
+and the Rust backend emits associated constants on each generated item type.
 These values describe the Kaitai schema layout; they are not an in-memory
 serialization or Kaitai runtime parser.
 
 By default, `typelink header` runs the full precursor pipeline: it resolves
 `@TypeLink` annotations, generates Kaitai schemas, then writes the requested
-header. Those same schemas determine the header's record members. The `.ksy`
-files are written beside their matching headers (or mirrored in the `-o`
-directory); if a model contains multiple root items, each schema gets an
+source file. Those same schemas determine the generated record members. The
+`.ksy` files are written beside their matching source files (or mirrored in the
+`-o` directory); if a model contains multiple root items, each schema gets an
 item-qualified filename. Use `--skip-kaitai` to omit writing `.ksy` sidecars;
-schemas are still generated internally to determine header fields. `--expanded`
+schemas are still generated internally to determine record fields. `--expanded`
 skips only TypeLink expansion. Empty item definitions need no schema and remain
-empty declarations in the generated header. When the header is written to
-stdout, `.ksy` sidecars are written beside the input SysML file unless skipped.
+empty declarations in the generated output. When source is written to stdout,
+`.ksy` sidecars are written beside the input SysML file unless skipped.
 
 Action `in` parameters become function inputs. In C++, a single `out`
 parameter becomes the function return value and other outputs are references.
 In C, output and `inout` parameters are pointers. Generated function bodies
 are stubs and include `TODO` annotations for SysML action succession
 connections; they intentionally do not implement execution order or runtime
-behavior.
+behavior. In Rust, inputs become method arguments, a single `out` value becomes
+the return type, and multiple outputs become a tuple.
 
 Use `--declarations-only` when action implementations live in separate source
 files. It emits ordinary C++ function declarations or C prototypes, without
 inline stub bodies or `TODO` annotations. The default continues to emit stubs
-for existing callers.
+for existing callers. The Rust backend always emits declarations, so the flag
+does not change its output.
 
 Pass a directory to process `.sysml` files recursively, like `typelink kaitai`.
-Headers and schemas are written beside source files by default, or mirrored
-beneath the directory named by `-o`. `typelink header --help` lists the
+Generated source files and schemas are written beside source files by default,
+or mirrored beneath the directory named by `-o`. `typelink header --help` lists the
 available backends and import options.
 
 The optional TypeLink expansion step reads only the linked file by default.

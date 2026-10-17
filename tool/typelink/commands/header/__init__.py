@@ -8,6 +8,9 @@ from ...headers.kaitai import item_selectors
 from .._files import targets
 
 
+_EXTENSIONS = {"c": ".h", "cpp": ".hpp", "rust": ".rs"}
+
+
 def _schema_path(header_path, item, multiple):
     stem = header_path.stem
     if multiple:
@@ -18,11 +21,11 @@ def _schema_path(header_path, item, multiple):
 
 def register(subparsers):
     command = subparsers.add_parser(
-        "header", help="generate source headers from SysML structure and behavior")
+        "header", help="generate source declarations from SysML structure and behavior")
     command.add_argument("file", help="SysML file or directory of SysML files")
     command.add_argument(
         "--language", choices=headers.languages(), default="cpp",
-        help="header language backend (default: %(default)s)")
+        help="output language backend (default: %(default)s)")
     command.add_argument(
         "-o", "--output",
         help="write here instead of stdout (directory targets use an output directory)")
@@ -59,10 +62,9 @@ def run(args):
                 text = emit.expand(
                     text, max_bytes=args.max_bytes, clone_repo=args.clone_repo,
                     warn=lambda message: print("warning:", message, file=sys.stderr))
-            header_path = (
-                (output_dir / Path(file).relative_to(Path(args.file))).with_suffix(".hpp")
-                if output_dir else Path(file).with_suffix(".hpp")
-            )
+            header_path = (output_dir / Path(file).relative_to(Path(args.file))
+                           if output_dir else Path(file)).with_suffix(
+                               _EXTENSIONS[args.language])
             if not directory and args.output:
                 header_path = Path(args.output)
             schemas = headers.generate_schemas(text)
