@@ -130,7 +130,7 @@ flowchart LR
     HEADER --> HEADER_RESOLVE["Resolve SysML namespaces and behavior"]
     HEADER_RESOLVE --> HEADER_KSY["Generate Kaitai schemas"]
     HEADER_KSY --> HEADER_IR["KSY-backed header model"]
-    HEADER_IR --> CPP["C++ / C backend"]
+    HEADER_IR --> CPP["C++ / C / Rust-Verus backend"]
     CPP --> HPP["Generated header"]
 
     SYNC --> SPEC["Canonical spec files"]
@@ -203,14 +203,15 @@ generate from the resulting SysMLv2 with `typelink kaitai --expanded`.
 
 ## Generate source headers
 
-`typelink header` translates SysML item definitions into C++ structs and
-translates `action def` behaviors into function stubs in their package
-namespaces. It resolves `@TypeLink` annotations by default; pass `--expanded`
-for a model that was expanded separately:
+`typelink header` translates SysML item definitions and `action def` behaviors
+into declarations for the selected language backend. It resolves `@TypeLink`
+annotations by default; pass `--expanded` for a model that was expanded
+separately:
 
 ```sh
 typelink header examples/packet.sysml -o packet.hpp --expanded
 typelink header model.sysml --language c -o model.h
+typelink header model.sysml --language rust -o model.rs
 typelink header model.sysml --declarations-only -o model.hpp
 ```
 
@@ -227,6 +228,14 @@ for multiplicities; optional values use a `has_value`/`value` wrapper. The
 header generator resolves a language-neutral declaration model before calling
 a backend, so additional output languages can be registered without coupling
 their renderers to SysML parsing.
+
+The `rust` backend emits a Verus-compatible `verus!` module containing Rust
+item structs, symbolic enums, and action-signature traits. Enum values do not
+receive an implicit numeric representation. Fixed-width fields follow the
+Kaitai schema and retain bit-layout constants; Rust package names become
+modules, and fixed, optional, and unbounded multiplicities use arrays,
+`Option`, and `alloc` collections. Rust action traits are declarations only;
+executable behavior and its contracts belong to the middleware layer.
 
 Generated C++ classes contain a nested `kaitai_layout` descriptor with
 `static constexpr` size and field offset/width values derived from the
@@ -256,7 +265,8 @@ behavior.
 Use `--declarations-only` when action implementations live in separate source
 files. It emits ordinary C++ function declarations or C prototypes, without
 inline stub bodies or `TODO` annotations. The default continues to emit stubs
-for existing callers.
+for existing callers. The Rust backend always emits declarations, so the flag
+does not change its output.
 
 Pass a directory to process `.sysml` files recursively, like `typelink kaitai`.
 Headers and schemas are written beside source files by default, or mirrored

@@ -28,6 +28,13 @@ class Record:
 
 
 @dataclass
+class Enumeration:
+    """A SysML enumeration and its ordered values."""
+    name: str
+    values: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Function:
     """A behavior translated to a generated function stub."""
     name: str
@@ -42,6 +49,7 @@ class Namespace:
     namespaces: List["Namespace"] = field(default_factory=list)
     records: List[Record] = field(default_factory=list)
     functions: List[Function] = field(default_factory=list)
+    enumerations: List[Enumeration] = field(default_factory=list)
 
 
 @dataclass

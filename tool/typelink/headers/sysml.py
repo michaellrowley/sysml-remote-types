@@ -2,7 +2,7 @@
 import re
 
 from .. import sysml
-from .model import Field, Function, Module, Namespace, Record
+from .model import Enumeration, Field, Function, Module, Namespace, Record
 
 P = sysml.P
 
@@ -216,6 +216,23 @@ def _action(context, source):
     return function
 
 
+def _enumeration(context):
+    declaration = context.definitionDeclaration()
+    enumeration = Enumeration(name=_declaration_name(declaration))
+    body = context.enumerationBody()
+    if body is None:
+        return enumeration
+    for member in body.enumerationUsageMember():
+        value = member.enumeratedValue()
+        usage = value.usage() if value is not None else None
+        declaration = usage.usageDeclaration() if usage is not None else None
+        if declaration is None:
+            raise HeaderError(
+                f"{enumeration.name}: cannot read enumeration value from {member.getText()!r}")
+        enumeration.values.append(_declaration_name(declaration))
+    return enumeration
+
+
 def resolve(text):
     """Parse one SysML document into a language-neutral header module."""
     tree = sysml.parse(text)
@@ -230,4 +247,9 @@ def resolve(text):
             continue
         _get_namespace(module.root, _namespace_path(context)).functions.append(
             _action(context, text))
+    for context in sysml.find_all(tree, P.EnumerationDefinitionContext):
+        if sysml.ancestor(context.parentCtx, P.EnumerationDefinitionContext) is not None:
+            continue
+        _get_namespace(module.root, _namespace_path(context)).enumerations.append(
+            _enumeration(context))
     return module

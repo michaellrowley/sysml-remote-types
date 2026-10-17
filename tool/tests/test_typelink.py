@@ -20,6 +20,7 @@ from typelink import (
 )  # noqa: E402
 from typelink.__main__ import build_parser, main  # noqa: E402
 from typelink.headers.c import render as render_c_header  # noqa: E402
+from typelink.headers.rust import render as render_rust_header  # noqa: E402
 from typelink.headers.sysml import HeaderError, resolve as resolve_header  # noqa: E402
 
 KAITAI_COMPILER = shutil.which("ksc") or shutil.which("kaitai-struct-compiler")
@@ -364,6 +365,13 @@ message Packet {
 
 
 class HeaderResolverTests(unittest.TestCase):
+    def test_resolves_enumerations(self):
+        module = resolve_header(
+            "package Demo { enum def Severity { enum Low; enum High; } }")
+        enumeration, = module.root.namespaces[0].enumerations
+        self.assertEqual((enumeration.name, enumeration.values),
+                         ("Severity", ["Low", "High"]))
+
     def test_ignores_action_reference_without_feature_wrapper(self):
         module = resolve_header(
             "item def Packet {} action def Parse { ref packet; }")
@@ -503,7 +511,67 @@ class HeaderGenerationTests(unittest.TestCase):
 
     def test_rejects_unregistered_backend(self):
         with self.assertRaisesRegex(headers.HeaderError, "unsupported header language"):
-            headers.generate("item def Packet { }", language="rust")
+            headers.generate("item def Packet { }", language="verus")
+
+    def test_rust_backend_emits_types_enums_and_action_traits(self):
+        model = '''package RuntimeDiagnostics {
+    enum def Severity { enum Trace; enum Error; }
+    item def DiagnosticRecord {
+        attribute severity : ScalarValues::Integer {
+            @DataSize { bits = 8; }
+            @DataOffset { bits = 0; }
+        }
+        attribute code : ScalarValues::Integer {
+            @DataSize { bits = 16; }
+            @DataOffset { bits = 8; }
+        }
+    }
+    action def Emit { in item record : DiagnosticRecord; }
+}'''
+        output = headers.generate(model, language="rust")
+        self.assertIn("pub enum Severity", output)
+        self.assertIn("Trace,", output)
+        self.assertIn("Error,", output)
+        self.assertIn("pub struct DiagnosticRecord", output)
+        self.assertIn("pub severity: u8", output)
+        self.assertIn("pub const SIZE_BITS: usize = 24;", output)
+        self.assertIn("pub const CODE_OFFSET_BITS: usize = 8;", output)
+        self.assertIn("pub trait Actions", output)
+        self.assertIn("fn emit(&mut self, record: DiagnosticRecord);", output)
+
+    def test_rust_header_command_uses_rs_extension(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source_dir = Path(temp) / "models"
+            source_dir.mkdir()
+            (source_dir / "model.sysml").write_text("item def Packet { }")
+            output_dir = Path(temp) / "generated"
+
+            self.assertEqual(main([
+                "header", str(source_dir), "--language", "rust",
+                "-o", str(output_dir)]), 0)
+            generated = output_dir / "model.rs"
+            self.assertTrue(generated.exists())
+            self.assertIn("pub struct Packet", generated.read_text())
+
+    def test_rust_backend_maps_multiplicities_and_keywords(self):
+        model = '''package Demo {
+    item def Packet {
+        attribute values : ScalarValues::Integer[4] {
+            @DataSize { bits = 16; }
+        }
+        attribute rest : ScalarValues::Integer[0..*] {
+            @DataSize { bits = 16; }
+        }
+    }
+    action def Yield { }
+}'''
+        output = headers.generate(model, language="rust")
+        self.assertIn("pub values: [u16; 4]", output)
+        self.assertIn("pub rest: alloc::vec::Vec<u16>", output)
+        self.assertIn("fn yield_(&mut self);", output)
+        optional = render_rust_header(resolve_header(
+            "item def Packet { attribute maybe : ScalarValues::Boolean[0..1]; }"))
+        self.assertIn("pub maybe: Option<bool>", optional)
 
     def test_empty_record_does_not_require_a_kaitai_sequence(self):
         output = headers.generate("item def Empty { }")
