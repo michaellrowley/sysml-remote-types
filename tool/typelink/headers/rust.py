@@ -137,7 +137,11 @@ class _RustRenderer:
             return f"[{element}; {field.bits // 8}]"
         if type_name.startswith("b") and type_name[1:].isdigit():
             width = int(type_name[1:])
-            return next((f"u{size}" for size in (8, 16, 32, 64) if width <= size), "u64")
+            if width > 64:
+                raise HeaderError(
+                    f"{field.name}: Rust does not support bit fields wider than "
+                    f"64 bits (got {width})")
+            return next(f"u{size}" for size in (8, 16, 32, 64) if width <= size)
         if field.alternatives:
             raise HeaderError(f"{field.name}: Rust unions require a named SysML type")
         scalar = _SCALARS.get(type_name)

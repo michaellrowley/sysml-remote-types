@@ -585,6 +585,14 @@ class HeaderGenerationTests(unittest.TestCase):
                 r"\(got 12\)"):
             render_rust_header(resolve_header(model))
 
+    def test_rust_backend_rejects_bit_fields_wider_than_u64(self):
+        model = "item def Packet { attribute value : b128; }"
+        with self.assertRaisesRegex(
+                HeaderError,
+                "value: Rust does not support bit fields wider than 64 bits "
+                r"\(got 128\)"):
+            render_rust_header(resolve_header(model))
+
     def test_empty_record_does_not_require_a_kaitai_sequence(self):
         output = headers.generate("item def Empty { }")
         self.assertIn("struct Empty {", output)
