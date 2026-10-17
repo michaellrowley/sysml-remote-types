@@ -1,4 +1,4 @@
-"""Language-neutral model for generated source headers."""
+"""Language-neutral model for generated source declarations."""
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -36,7 +36,7 @@ class Enumeration:
 
 @dataclass
 class Function:
-    """A behavior translated to a generated function stub."""
+    """A behavior translated to a generated operation declaration."""
     name: str
     parameters: List[Field] = field(default_factory=list)
     connections: List[str] = field(default_factory=list)
