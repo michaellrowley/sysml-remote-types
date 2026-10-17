@@ -28,7 +28,7 @@ def generate_schemas(text):
     return schemas
 
 
-def generate(text, language="cpp", schemas=None):
+def generate(text, language="cpp", schemas=None, declarations_only=False):
     """Resolve SysML declarations, source record fields from KSY, and render."""
     backend = _BACKENDS.get(language)
     if backend is None:
@@ -39,4 +39,4 @@ def generate(text, language="cpp", schemas=None):
     module = resolve(text)
     apply_kaitai(module, schemas)
     renderer = import_module(f"{__name__}.{backend}")
-    return renderer.render(module)
+    return renderer.render(module, declarations_only=declarations_only)

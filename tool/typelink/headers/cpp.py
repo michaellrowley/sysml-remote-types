@@ -302,7 +302,7 @@ class _CppRenderer:
             visit(path)
         return ordered
 
-    def _render_function(self, function, namespace_path):
+    def _render_function(self, function, namespace_path, declarations_only=False):
         outputs = [param for param in function.parameters if param.direction == "out"]
         return_field = outputs[0] if len(outputs) == 1 else None
         return_type = (
@@ -323,22 +323,26 @@ class _CppRenderer:
             parameters.append(f"{value_type} {_identifier(param.name)}")
         signature = f"{return_type} {_identifier(function.name)}"
         parameter_text = ", ".join(parameters)
+        prefix = "" if declarations_only else "inline "
+        closing = ");" if declarations_only else ") {"
         if len(signature) + len(parameter_text) + 3 <= 88:
-            lines = [f"inline {signature}({parameter_text}) {{"]
+            lines = [f"{prefix}{signature}({parameter_text}{closing}"]
         elif parameters:
-            lines = [f"inline {signature}("]
+            lines = [f"{prefix}{signature}("]
             lines.extend(
-                f"    {parameter}{',' if index < len(parameters) - 1 else ') {'}"
+                f"    {parameter}{',' if index < len(parameters) - 1 else closing}"
                 for index, parameter in enumerate(parameters))
         else:
-            lines = [f"inline {signature}() {{"]
+            lines = [f"{prefix}{signature}(){closing[1:]}"]
+        if declarations_only:
+            return lines
         for connection in function.connections:
             lines.append(f"    // TODO: implement SysML action connection: {connection}")
         lines.append(f'    throw std::logic_error("TODO: implement {function.name}");')
         lines.append("}")
         return lines
 
-    def render(self):
+    def render(self, declarations_only=False):
         lines = [
             "#pragma once",
             "#include <array>",
@@ -371,13 +375,14 @@ class _CppRenderer:
                 continue
             self._open_namespace(namespace_path, lines)
             for function in namespace.functions:
-                lines.extend(self._render_function(function, namespace_path))
+                lines.extend(self._render_function(
+                    function, namespace_path, declarations_only))
                 lines.append("")
             self._close_namespace(namespace_path, lines)
             lines.append("")
         return "\n".join(lines).rstrip() + "\n"
 
 
-def render(module):
+def render(module, declarations_only=False):
     """Render one resolved module to a C++ header."""
-    return _CppRenderer(module).render()
+    return _CppRenderer(module).render(declarations_only=declarations_only)

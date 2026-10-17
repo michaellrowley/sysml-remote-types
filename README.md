@@ -211,6 +211,7 @@ for a model that was expanded separately:
 ```sh
 typelink header examples/packet.sysml -o packet.hpp --expanded
 typelink header model.sysml --language c -o model.h
+typelink header model.sysml --declarations-only -o model.hpp
 ```
 
 The `cpp` backend emits C++17. Generated Kaitai schemas are the source of truth
@@ -251,6 +252,11 @@ In C, output and `inout` parameters are pointers. Generated function bodies
 are stubs and include `TODO` annotations for SysML action succession
 connections; they intentionally do not implement execution order or runtime
 behavior.
+
+Use `--declarations-only` when action implementations live in separate source
+files. It emits ordinary C++ function declarations or C prototypes, without
+inline stub bodies or `TODO` annotations. The default continues to emit stubs
+for existing callers.
 
 Pass a directory to process `.sysml` files recursively, like `typelink kaitai`.
 Headers and schemas are written beside source files by default, or mirrored

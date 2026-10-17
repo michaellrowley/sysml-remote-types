@@ -475,6 +475,17 @@ class HeaderGenerationTests(unittest.TestCase):
         self.assertIn('throw std::logic_error("TODO: implement Parse");', output)
         self.assertLess(output.index("struct Header {"), output.index("struct Packet :"))
 
+    def test_header_declarations_only_omits_action_bodies(self):
+        cpp = headers.generate(self.MODEL, declarations_only=True)
+        c = headers.generate(self.MODEL, language="c", declarations_only=True)
+
+        self.assertIn("Packet Parse(const Packet& packet);", cpp)
+        self.assertNotIn("inline Packet Parse(", cpp)
+        self.assertNotIn("TODO: implement", cpp)
+        self.assertIn("void Demo_Wire_Parse(", c)
+        self.assertNotIn("static inline void Demo_Wire_Parse(", c)
+        self.assertNotIn("TODO: implement", c)
+
     def test_cpp_header_compiles(self):
         compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
         if not compiler:

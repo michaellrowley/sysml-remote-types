@@ -30,6 +30,9 @@ def register(subparsers):
         "--expanded", action="store_true",
         help="skip @TypeLink resolution for already-expanded SysML input")
     command.add_argument(
+        "--declarations-only", action="store_true",
+        help="emit action declarations without stub bodies")
+    command.add_argument(
         "--skip-kaitai", action="store_true",
         help="do not write .ksy sidecars (schemas are still used for header fields)")
     command.add_argument(
@@ -65,7 +68,8 @@ def run(args):
             schemas = headers.generate_schemas(text)
             multiple_items = len(item_selectors(text)) > 1
             output = headers.generate(
-                text, language=args.language, schemas=schemas)
+                text, language=args.language, schemas=schemas,
+                declarations_only=args.declarations_only)
             if not args.skip_kaitai:
                 for item, schema in schemas:
                     schema_path = _schema_path(
