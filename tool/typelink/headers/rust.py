@@ -129,6 +129,10 @@ class _RustRenderer:
 
     def _base_type(self, type_name, owner_path, namespace_path, field):
         if type_name in ("str", "bytes") and field.bits is not None:
+            if field.bits % 8:
+                raise HeaderError(
+                    f"{field.name}: Rust {type_name} fields require a byte-aligned "
+                    f"bit width (got {field.bits})")
             element = "u8"
             return f"[{element}; {field.bits // 8}]"
         if type_name.startswith("b") and type_name[1:].isdigit():

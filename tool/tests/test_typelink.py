@@ -573,6 +573,18 @@ class HeaderGenerationTests(unittest.TestCase):
             "item def Packet { attribute maybe : ScalarValues::Boolean[0..1]; }"))
         self.assertIn("pub maybe: Option<bool>", optional)
 
+    def test_rust_backend_rejects_non_byte_aligned_byte_fields(self):
+        model = '''item def Packet {
+    attribute payload : bytes {
+        @DataSize { bits = 12; }
+    }
+}'''
+        with self.assertRaisesRegex(
+                HeaderError,
+                "payload: Rust bytes fields require a byte-aligned bit width "
+                r"\(got 12\)"):
+            render_rust_header(resolve_header(model))
+
     def test_empty_record_does_not_require_a_kaitai_sequence(self):
         output = headers.generate("item def Empty { }")
         self.assertIn("struct Empty {", output)
