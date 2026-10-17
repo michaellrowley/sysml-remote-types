@@ -262,7 +262,7 @@ class _CRenderer:
                     f"#define {field_prefix}_KAITAI_OFFSET_BITS {field.offset_bits}")
         lines.append("")
 
-    def _function(self, function, namespace_path):
+    def _function(self, function, namespace_path, declarations_only=False):
         parameters = []
         for param in function.parameters:
             base = self._base_type(param.type_name, namespace_path, namespace_path)
@@ -284,17 +284,20 @@ class _CRenderer:
             else:
                 parameters.append(f"{base} {_identifier(param.name)}")
         name = self._c_name(namespace_path + (_identifier(function.name),))
-        signature = f"static inline void {name}"
+        signature = f"{'void' if declarations_only else 'static inline void'} {name}"
         parameter_text = ", ".join(parameters) or "void"
+        closing = ");" if declarations_only else ") {"
         if len(signature) + len(parameter_text) + 4 <= 88:
-            lines = [f"{signature}({parameter_text}) {{"]
+            lines = [f"{signature}({parameter_text}{closing}"]
         elif parameters:
             lines = [f"{signature}("]
             lines.extend(
-                f"    {parameter}{',' if index < len(parameters) - 1 else ') {'}"
+                f"    {parameter}{',' if index < len(parameters) - 1 else closing}"
                 for index, parameter in enumerate(parameters))
         else:
-            lines = [f"{signature}(void) {{"]
+            lines = [f"{signature}(void{closing}"]
+        if declarations_only:
+            return lines
         for param in function.parameters:
             lines.append(f"    (void){_identifier(param.name)};")
         for connection in function.connections:
@@ -303,7 +306,7 @@ class _CRenderer:
         lines.extend(("    /* TODO: implement this action. */", "}"))
         return lines
 
-    def render(self):
+    def render(self, declarations_only=False):
         guard = self._guard()
         lines = [
             f"#ifndef {guard}",
@@ -327,7 +330,7 @@ class _CRenderer:
         def functions(namespace, path=()):
             current = path + ((_identifier(namespace.name),) if namespace.name else ())
             for function in namespace.functions:
-                lines.extend(self._function(function, current))
+                lines.extend(self._function(function, current, declarations_only))
                 lines.append("")
             for child in namespace.namespaces:
                 functions(child, current)
@@ -337,6 +340,6 @@ class _CRenderer:
         return "\n".join(lines) + "\n"
 
 
-def render(module):
+def render(module, declarations_only=False):
     """Render one resolved module to a C header."""
-    return _CRenderer(module).render()
+    return _CRenderer(module).render(declarations_only=declarations_only)
