@@ -1,4 +1,4 @@
-"""Language-neutral source-header generation and backend registry."""
+"""Language-neutral source-declaration generation and backend registry."""
 from importlib import import_module
 
 from .. import kaitai as kaitai_generator

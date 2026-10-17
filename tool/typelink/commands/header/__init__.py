@@ -21,11 +21,11 @@ def _schema_path(header_path, item, multiple):
 
 def register(subparsers):
     command = subparsers.add_parser(
-        "header", help="generate source headers from SysML structure and behavior")
+        "header", help="generate source declarations from SysML structure and behavior")
     command.add_argument("file", help="SysML file or directory of SysML files")
     command.add_argument(
         "--language", choices=headers.languages(), default="cpp",
-        help="header language backend (default: %(default)s)")
+        help="output language backend (default: %(default)s)")
     command.add_argument(
         "-o", "--output",
         help="write here instead of stdout (directory targets use an output directory)")
